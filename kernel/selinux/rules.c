@@ -184,6 +184,18 @@ static int apply_kernelsu_rules_fn(void *ptr)
     ksu_allow(db, "system_server", KERNEL_SU_DOMAIN, "process", "getpgid");
     ksu_allow(db, "system_server", KERNEL_SU_DOMAIN, "process", "sigkill");
 
+    /*
+     * Qualcomm Perf HAL compatibility:
+     * allow reading /proc/sys/kernel/sched_busy_* (type: proc_sched).
+     * Without this, vendor_hal_perf_default hits SELinux denials and
+     * reports "Failed to read /proc/sys/kernel/sched_busy_*".
+     */
+    ksu_allow(db, "vendor_hal_perf_default", "proc_sched", "dir", "search");
+    ksu_allow(db, "vendor_hal_perf_default", "proc_sched", "file", "open");
+    ksu_allow(db, "vendor_hal_perf_default", "proc_sched", "file", "read");
+    ksu_allow(db, "vendor_hal_perf_default", "proc_sched", "file", "write");
+    ksu_allow(db, "vendor_hal_perf_default", "proc_sched", "file", "getattr");
+
     return 0;
 }
 
