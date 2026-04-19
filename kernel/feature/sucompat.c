@@ -1,5 +1,6 @@
 #include <linux/preempt.h>
 #include <linux/printk.h>
+#include <linux/random.h>
 #include <linux/mm.h>
 #include <linux/uaccess.h>
 #include <asm/current.h>
@@ -37,6 +38,7 @@
 #define SH_PATH "/system/bin/sh"
 
 bool ksu_su_compat_enabled __read_mostly = true;
+static char ksu_hidden_adb_decoy[32] __read_mostly;
 
 static int su_compat_feature_get(u64 *value)
 {
@@ -86,10 +88,78 @@ static char __user *ksud_user_path(void)
 	return userspace_stack_buffer(ksud_path, sizeof(ksud_path));
 }
 
+static char __user *hidden_adb_user_path(void)
+{
+	u32 r;
+
+	if (unlikely(!READ_ONCE(ksu_hidden_adb_decoy[0]))) {
+		r = get_random_u32();
+		snprintf(ksu_hidden_adb_decoy, sizeof(ksu_hidden_adb_decoy),
+			 "/dev/.%08x", r);
+	}
+
+	return userspace_stack_buffer(ksu_hidden_adb_decoy,
+				      strnlen(ksu_hidden_adb_decoy,
+					      sizeof(ksu_hidden_adb_decoy)) + 1);
+}
+
+static bool ksu_is_untrusted_or_isolated_uid(uid_t uid)
+{
+	uid_t appid = uid % PER_USER_RANGE;
+
+	if (appid >= FIRST_APPLICATION_UID && appid <= LAST_APPLICATION_UID)
+		return true;
+
+	/* Android SDK sandbox range. */
+	if (appid >= 20000 && appid <= 29999)
+		return true;
+
+	if (appid >= FIRST_ISOLATED_UID && appid <= LAST_ISOLATED_UID)
+		return true;
+
+	return false;
+}
+
+static bool ksu_should_hide_adb_descendant(const char __user *filename_user)
+{
+	char path[64];
+	uid_t uid = current_uid().val;
+	int copied;
+
+	if (!filename_user)
+		return false;
+
+	if (!ksu_is_untrusted_or_isolated_uid(uid))
+		return false;
+
+	/*
+	 * Do not interfere with allowlisted callers; they may legitimately
+	 * need KSU-managed paths.
+	 */
+	if (ksu_is_allow_uid_for_current(uid))
+		return false;
+
+	memset(path, 0, sizeof(path));
+	copied = strncpy_from_user_nofault(path, filename_user, sizeof(path) - 1);
+	if (copied <= 0)
+		return false;
+
+	path[sizeof(path) - 1] = '\0';
+	return !strncmp(path, "/data/adb/", 10);
+}
+
 int ksu_handle_faccessat(int *dfd, const char __user **filename_user,
 		int *mode, int *__unused_flags)
 {
 	const char su[] = SU_PATH;
+	char __user *fake_path;
+
+	if (ksu_should_hide_adb_descendant(*filename_user)) {
+		fake_path = hidden_adb_user_path();
+		if (fake_path)
+			*filename_user = fake_path;
+		return 0;
+	}
 
 	if (!ksu_is_allow_uid_for_current(current_uid().val)) {
 		return 0;
@@ -112,6 +182,14 @@ int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags)
 {
 	// const char sh[] = SH_PATH;
 	const char su[] = SU_PATH;
+	char __user *fake_path;
+
+	if (ksu_should_hide_adb_descendant(*filename_user)) {
+		fake_path = hidden_adb_user_path();
+		if (fake_path)
+			*filename_user = fake_path;
+		return 0;
+	}
 
 	if (!ksu_is_allow_uid_for_current(current_uid().val)) {
 		return 0;
