@@ -495,9 +495,9 @@ pub fn run() -> Result<()> {
             .with_tag("KernelSU Next"),
     );
 
-    // the kernel executes su with argv[0] = "su" and replace it with us
+    // The kernel replaces the executable but preserves the caller's argv[0].
     let arg0 = std::env::args().next().unwrap_or_default();
-    if arg0 == "su" || arg0 == "/system/bin/su" {
+    if arg0 == "su" || arg0.ends_with("/su") {
         return crate::su::root_shell();
     }
 

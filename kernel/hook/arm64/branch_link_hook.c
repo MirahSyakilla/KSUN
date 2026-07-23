@@ -5,6 +5,7 @@
 #include <linux/compat.h>
 #include <linux/build_bug.h>
 #include <linux/compiler.h>
+#include <linux/cred.h>
 #include <linux/file.h>
 #include <linux/fcntl.h>
 #include <linux/fs.h>
@@ -312,13 +313,15 @@ static long (*do_faccessat_fn)(int dfd, const char __user *filename, int mode,
 static long __nocfi ksu_do_faccessat(int dfd, const char __user *filename,
 				     int mode, int flags)
 {
+	const struct cred *old_cred = NULL;
 	long ret;
 #ifdef CONFIG_KSU_KPROBES_NOMOUNT
 	struct ksu_nomount_lookup_scope lookup_scope;
 #endif
 
 	if (unlikely(ksu_su_compat_enabled && ksu_bl_user_path_is_su(filename)))
-		ksu_handle_faccessat(&dfd, &filename, &mode, &flags);
+		old_cred = ksu_handle_faccessat(&dfd, &filename, &mode,
+						&flags);
 #ifdef CONFIG_KSU_KPROBES_NOMOUNT
 	ksu_nomount_lookup_scope_enter(&lookup_scope, dfd);
 #endif
@@ -326,6 +329,8 @@ static long __nocfi ksu_do_faccessat(int dfd, const char __user *filename,
 #ifdef CONFIG_KSU_KPROBES_NOMOUNT
 	ksu_nomount_lookup_scope_exit(&lookup_scope);
 #endif
+	if (old_cred)
+		revert_creds(old_cred);
 	return ret;
 }
 #else
@@ -333,13 +338,14 @@ static long (*do_faccessat_fn)(int dfd, const char __user *filename, int mode);
 static long __nocfi ksu_do_faccessat(int dfd, const char __user *filename,
 				     int mode)
 {
+	const struct cred *old_cred = NULL;
 	long ret;
 #ifdef CONFIG_KSU_KPROBES_NOMOUNT
 	struct ksu_nomount_lookup_scope lookup_scope;
 #endif
 
 	if (unlikely(ksu_su_compat_enabled && ksu_bl_user_path_is_su(filename)))
-		ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
+		old_cred = ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
 #ifdef CONFIG_KSU_KPROBES_NOMOUNT
 	ksu_nomount_lookup_scope_enter(&lookup_scope, dfd);
 #endif
@@ -347,6 +353,8 @@ static long __nocfi ksu_do_faccessat(int dfd, const char __user *filename,
 #ifdef CONFIG_KSU_KPROBES_NOMOUNT
 	ksu_nomount_lookup_scope_exit(&lookup_scope);
 #endif
+	if (old_cred)
+		revert_creds(old_cred);
 	return ret;
 }
 #endif
@@ -410,13 +418,14 @@ static int (*vfs_fstatat_fn)(int dfd, const char __user *filename,
 static int __nocfi ksu_vfs_fstatat(int dfd, const char __user *filename,
 				   struct kstat *stat, int flags)
 {
+	const struct cred *old_cred = NULL;
 	int ret;
 #ifdef CONFIG_KSU_KPROBES_NOMOUNT
 	struct ksu_nomount_lookup_scope lookup_scope;
 #endif
 
 	if (unlikely(ksu_su_compat_enabled && ksu_bl_user_path_is_su(filename)))
-		ksu_handle_stat(&dfd, &filename, &flags);
+		old_cred = ksu_handle_stat(&dfd, &filename, &flags);
 #ifdef CONFIG_KSU_KPROBES_NOMOUNT
 	ksu_nomount_lookup_scope_enter(&lookup_scope, dfd);
 #endif
@@ -424,6 +433,8 @@ static int __nocfi ksu_vfs_fstatat(int dfd, const char __user *filename,
 #ifdef CONFIG_KSU_KPROBES_NOMOUNT
 	ksu_nomount_lookup_scope_exit(&lookup_scope);
 #endif
+	if (old_cred)
+		revert_creds(old_cred);
 	ksu_bl_handle_stat_result(stat, ret);
 	return ret;
 }
@@ -451,13 +462,14 @@ static int __nocfi ksu_vfs_statx(int dfd, const char __user *filename,
 				 int flags, struct kstat *stat,
 				 u32 request_mask)
 {
+	const struct cred *old_cred = NULL;
 	int ret;
 #ifdef CONFIG_KSU_KPROBES_NOMOUNT
 	struct ksu_nomount_lookup_scope lookup_scope;
 #endif
 
 	if (unlikely(ksu_su_compat_enabled && ksu_bl_user_path_is_su(filename)))
-		ksu_handle_stat(&dfd, &filename, &flags);
+		old_cred = ksu_handle_stat(&dfd, &filename, &flags);
 #ifdef CONFIG_KSU_KPROBES_NOMOUNT
 	ksu_nomount_lookup_scope_enter(&lookup_scope, dfd);
 #endif
@@ -465,6 +477,8 @@ static int __nocfi ksu_vfs_statx(int dfd, const char __user *filename,
 #ifdef CONFIG_KSU_KPROBES_NOMOUNT
 	ksu_nomount_lookup_scope_exit(&lookup_scope);
 #endif
+	if (old_cred)
+		revert_creds(old_cred);
 	ksu_bl_handle_stat_result(stat, ret);
 	return ret;
 }

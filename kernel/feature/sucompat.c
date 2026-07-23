@@ -25,6 +25,7 @@
 #include <linux/sched.h>
 #endif
 #include <linux/ptrace.h>
+#include <asm/unaligned.h>
 
 #include "arch.h"
 #include "policy/allowlist.h"
@@ -51,8 +52,16 @@
 
 #define SU_PATH "/system/bin/su"
 #define SH_PATH "/system/bin/sh"
+#define APP_DATA_PATH "/data/data/"
+#define APP_USER_PATH "/data/user/"
 #define KSU_SU_PATH_WORDS 2
 #define KSU_SU_PATH_PREFIX ((u16)'/' | ((u16)'s' << 8))
+#define KSU_APP_DATA_PATH_PREFIX ((u16)'/' | ((u16)'d' << 8))
+#define KSU_APP_DATA_PATH_LEN (sizeof(APP_DATA_PATH) - 1)
+#define KSU_APP_USER_PATH_LEN (sizeof(APP_USER_PATH) - 1)
+#define KSU_APP_DATA_PATH_WORDS 2
+#define KSU_APP_DATA_TAIL_MASK 0x0000000000ffffffULL
+#define KSU_APP_DATA_SCAN_MAX 256
 #define KSU_SU_TAIL_MASK 0x00ffffffffffffffULL
 
 bool ksu_su_compat_enabled __read_mostly = true;
@@ -92,24 +101,150 @@ static __always_inline bool ksu_sucompat_current_allowed(void)
 	return __ksu_is_allow_uid(uid);
 }
 
-#ifdef CONFIG_KSU_KPROBES_HOOK
 static const char su_path_cmp[KSU_SU_PATH_WORDS * sizeof(u64)]
 	__aligned(sizeof(u64)) = SU_PATH;
+static const char app_data_path_cmp[KSU_APP_DATA_PATH_WORDS * sizeof(u64)]
+	__aligned(sizeof(u64)) = APP_DATA_PATH;
+static const char app_user_path_cmp[KSU_APP_DATA_PATH_WORDS * sizeof(u64)]
+	__aligned(sizeof(u64)) = APP_USER_PATH;
 
+static void __user *ksu_sucompat_stack_buffer(const void *d, size_t len)
+{
+	char __user *p = (void __user *)current_user_stack_pointer() - len;
+
+	return copy_to_user(p, d, len) ? NULL : p;
+}
+
+static __always_inline const char __user *ksu_sucompat_user_su_arg0(void)
+{
+	static const char su_arg0[] = "su";
+
+	return ksu_sucompat_stack_buffer(su_arg0, sizeof(su_arg0));
+}
+
+static __always_inline void ksu_sucompat_set_argv0_su(struct user_arg_ptr *argv)
+{
+	const char __user *arg0;
+
+	if (!argv)
+		return;
+
+	arg0 = ksu_sucompat_user_su_arg0();
+	if (!arg0)
+		return;
+
+#ifdef CONFIG_COMPAT
+	if (unlikely(argv->is_compat)) {
+		compat_uptr_t compat_arg0 = ptr_to_compat((void __user *)arg0);
+
+		if (argv->ptr.compat)
+			(void)put_user(compat_arg0,
+				       (compat_uptr_t __user *)argv->ptr.compat);
+		return;
+	}
+#endif
+	if (argv->ptr.native)
+		(void)put_user(arg0,
+			       (const char __user *__user *)argv->ptr.native);
+}
+
+#if !defined(CONFIG_KSU_KPROBES_HOOK) || defined(CONFIG_KSU_HACK_ARM64_BRANCH_LINK)
 static __always_inline bool
-ksu_sucompat_user_path_matches(const char __user *filename)
+ksu_sucompat_kernel_system_path_matches(const char *filename)
 {
 	const u64 *su_words = (const u64 *)su_path_cmp;
-	const char __user *path;
-	const u64 __user *user_words;
-	u16 prefix;
 	u64 word;
 
 	if (!filename)
 		return false;
 
 	BUILD_BUG_ON(sizeof(SU_PATH) + 1 != sizeof(su_path_cmp));
-	path = (const char __user *)untagged_addr((unsigned long)filename);
+	if (likely(get_unaligned((const u16 *)filename) != KSU_SU_PATH_PREFIX))
+		return false;
+
+	word = get_unaligned((const u64 *)filename + KSU_SU_PATH_WORDS - 1);
+	if (likely((word & KSU_SU_TAIL_MASK) !=
+		   (su_words[KSU_SU_PATH_WORDS - 1] & KSU_SU_TAIL_MASK)))
+		return false;
+
+	return get_unaligned((const u64 *)filename) == su_words[0];
+}
+
+static __always_inline bool
+ksu_sucompat_kernel_app_data_su_path_matches(const char *filename)
+{
+	const u64 *app_words = (const u64 *)app_data_path_cmp;
+	const u64 *user_words = (const u64 *)app_user_path_cmp;
+	const char *base, *p;
+	unsigned int base_len;
+	unsigned int i;
+	u64 word;
+
+	BUILD_BUG_ON(KSU_APP_DATA_PATH_LEN != 11);
+	BUILD_BUG_ON(KSU_APP_USER_PATH_LEN != 11);
+
+	word = get_unaligned((const u64 *)filename);
+	if (word == app_words[0]) {
+		word = get_unaligned((const u64 *)filename + 1);
+		if (likely((word & KSU_APP_DATA_TAIL_MASK) !=
+			   (app_words[1] & KSU_APP_DATA_TAIL_MASK)))
+			return false;
+		base_len = KSU_APP_DATA_PATH_LEN;
+	} else if (word == user_words[0]) {
+		word = get_unaligned((const u64 *)filename + 1);
+		if (likely((word & KSU_APP_DATA_TAIL_MASK) !=
+			   (user_words[1] & KSU_APP_DATA_TAIL_MASK)))
+			return false;
+		base_len = KSU_APP_USER_PATH_LEN;
+	} else {
+		return false;
+	}
+
+	base = filename + base_len;
+	p = base;
+	for (i = base_len; i < KSU_APP_DATA_SCAN_MAX; i++, p++) {
+		char c = *p;
+
+		if (!c)
+			break;
+		if (c == '/')
+			base = p + 1;
+	}
+	if (unlikely(i == KSU_APP_DATA_SCAN_MAX || i + 1 < sizeof(KSUD_PATH)))
+		return false;
+
+	return base[0] == 's' && base[1] == 'u' && base[2] == '\0';
+}
+
+static __always_inline bool
+ksu_sucompat_kernel_exec_path_matches(const char *filename)
+{
+	u16 prefix;
+
+	if (!filename)
+		return false;
+
+	prefix = get_unaligned((const u16 *)filename);
+	if (likely(prefix != KSU_APP_DATA_PATH_PREFIX)) {
+		if (likely(prefix != KSU_SU_PATH_PREFIX))
+			return false;
+		return ksu_sucompat_kernel_system_path_matches(filename);
+	}
+
+	return ksu_sucompat_kernel_app_data_su_path_matches(filename);
+}
+#endif
+
+#ifdef CONFIG_KSU_KPROBES_HOOK
+static __always_inline bool
+ksu_sucompat_user_system_path_matches(const char __user *path)
+{
+	const u64 *su_words = (const u64 *)su_path_cmp;
+	const u64 __user *user_words;
+	u16 prefix;
+	u64 word;
+
+	BUILD_BUG_ON(sizeof(SU_PATH) + 1 != sizeof(su_path_cmp));
 	if (get_user(prefix, (const u16 __user *)path))
 		return false;
 	if (likely(prefix != KSU_SU_PATH_PREFIX))
@@ -127,25 +262,107 @@ ksu_sucompat_user_path_matches(const char __user *filename)
 	return word == su_words[0];
 }
 
-static void __user *userspace_stack_buffer(const void *d, size_t len)
+static __always_inline bool
+ksu_sucompat_user_path_matches(const char __user *filename)
 {
-	// To avoid having to mmap a page in userspace, just write below the stack
-	// pointer.
-	char __user *p = (void __user *)current_user_stack_pointer() - len;
+	const char __user *path;
 
-	return copy_to_user(p, d, len) ? NULL : p;
+	if (!filename)
+		return false;
+
+	path = (const char __user *)untagged_addr((unsigned long)filename);
+	return ksu_sucompat_user_system_path_matches(path);
+}
+
+static __always_inline bool
+ksu_sucompat_user_app_data_su_path_matches(const char __user *path)
+{
+	const u64 *data_words = (const u64 *)app_data_path_cmp;
+	const u64 *user_path_words = (const u64 *)app_user_path_cmp;
+	const u64 __user *path_words = (const u64 __user *)path;
+	const char __user *base, *p;
+	unsigned int base_len;
+	unsigned int i;
+	u64 word;
+	char c;
+
+	BUILD_BUG_ON(KSU_APP_DATA_PATH_LEN != 11);
+	BUILD_BUG_ON(KSU_APP_USER_PATH_LEN != 11);
+
+	if (get_user(word, &path_words[0]))
+		return false;
+
+	if (word == data_words[0]) {
+		if (get_user(word, &path_words[1]) ||
+		    (word & KSU_APP_DATA_TAIL_MASK) !=
+			    (data_words[1] & KSU_APP_DATA_TAIL_MASK))
+			return false;
+		base_len = KSU_APP_DATA_PATH_LEN;
+	} else if (word == user_path_words[0]) {
+		if (get_user(word, &path_words[1]) ||
+		    (word & KSU_APP_DATA_TAIL_MASK) !=
+			    (user_path_words[1] & KSU_APP_DATA_TAIL_MASK))
+			return false;
+		base_len = KSU_APP_USER_PATH_LEN;
+	} else {
+		return false;
+	}
+
+	base = path + base_len;
+	p = base;
+	for (i = base_len; i < KSU_APP_DATA_SCAN_MAX; i++, p++) {
+		if (get_user(c, p))
+			return false;
+		if (!c)
+			break;
+		if (c == '/')
+			base = p + 1;
+	}
+	if (unlikely(i == KSU_APP_DATA_SCAN_MAX || i + 1 < sizeof(KSUD_PATH)))
+		return false;
+
+	if (get_user(c, base) || c != 's')
+		return false;
+	if (get_user(c, base + 1) || c != 'u')
+		return false;
+	if (get_user(c, base + 2) || c)
+		return false;
+
+	return true;
+}
+
+static __always_inline bool
+ksu_sucompat_user_exec_path_matches(const char __user *filename)
+{
+	const char __user *path;
+	u16 prefix;
+
+	if (!filename)
+		return false;
+
+	path = (const char __user *)untagged_addr((unsigned long)filename);
+	if (get_user(prefix, (const u16 __user *)path))
+		return false;
+
+	if (likely(prefix != KSU_APP_DATA_PATH_PREFIX)) {
+		if (likely(prefix != KSU_SU_PATH_PREFIX))
+			return false;
+		return ksu_sucompat_user_system_path_matches(path);
+	}
+
+	return ksu_sucompat_user_app_data_su_path_matches(path);
 }
 
 static char __user *ksud_user_path(void)
 {
 	static const char ksud_path[] = KSUD_PATH;
 
-	return userspace_stack_buffer(ksud_path, sizeof(ksud_path));
+	return ksu_sucompat_stack_buffer(ksud_path, sizeof(ksud_path));
 }
 
 static char __user *empty_user_path(void)
 {
-	return userspace_stack_buffer("", sizeof(""));
+	return ksu_sucompat_stack_buffer("", sizeof(""));
 }
 
 static bool is_ksud_exists()
@@ -220,55 +437,68 @@ do_orig_stat:
 }
 
 #ifdef CONFIG_KSU_HACK_ARM64_BRANCH_LINK
-static bool ksu_redirect_su_path(const char __user **filename_user, char event)
+static const struct cred *ksu_redirect_su_path(const char __user **filename_user,
+					       char event)
 {
 	const char __user *new_filename;
 	const struct cred *old_cred;
-	bool exists;
 
 	if (unlikely(!ksu_su_compat_enabled))
-		return false;
+		return NULL;
 	if (!filename_user)
-		return false;
+		return NULL;
 
 	if (likely(!ksu_sucompat_user_path_matches(*filename_user)))
-		return false;
+		return NULL;
 	if (!ksu_sucompat_current_allowed())
-		return false;
+		return NULL;
 
 	old_cred = override_creds(ksu_cred);
-	exists = is_ksud_exists();
-	revert_creds(old_cred);
-	if (!exists)
-		return false;
+	if (!is_ksud_exists()) {
+		revert_creds(old_cred);
+		return NULL;
+	}
 
 	new_filename = ksud_user_path();
-	if (!new_filename)
-		return false;
+	if (!new_filename) {
+		revert_creds(old_cred);
+		return NULL;
+	}
 
 	ksu_compat_sulog(event);
 	*filename_user = new_filename;
-	return true;
+	return old_cred;
 }
 
-void ksu_handle_faccessat(int *dfd, const char __user **filename_user,
-			  int *mode, int *flags)
+const struct cred *ksu_handle_faccessat(int *dfd,
+					const char __user **filename_user,
+					int *mode, int *flags)
 {
+	const struct cred *old_cred;
+
 	(void)dfd;
 	(void)mode;
 	(void)flags;
 
-	if (ksu_redirect_su_path(filename_user, 'a'))
+	old_cred = ksu_redirect_su_path(filename_user, 'a');
+	if (old_cred)
 		pr_info("faccessat su->ksud!\n");
+	return old_cred;
 }
 
-void ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags)
+const struct cred *ksu_handle_stat(int *dfd,
+				   const char __user **filename_user,
+				   int *flags)
 {
+	const struct cred *old_cred;
+
 	(void)dfd;
 	(void)flags;
 
-	if (ksu_redirect_su_path(filename_user, 's'))
+	old_cred = ksu_redirect_su_path(filename_user, 's');
+	if (old_cred)
 		pr_info("newfstatat su->ksud!\n");
+	return old_cred;
 }
 
 bool ksu_handle_stat_kernel_filename(char *filename)
@@ -280,7 +510,7 @@ bool ksu_handle_stat_kernel_filename(char *filename)
 		return false;
 	if (!filename)
 		return false;
-	if (likely(memcmp(filename, SU_PATH, sizeof(SU_PATH))))
+	if (likely(!ksu_sucompat_kernel_system_path_matches(filename)))
 		return false;
 	if (!ksu_sucompat_current_allowed())
 		return false;
@@ -303,6 +533,7 @@ bool ksu_handle_stat_kernel_filename(char *filename)
 long ksu_handle_execve_sucompat(const char __user **filename_user, int orig_nr, struct pt_regs *regs)
 {
 	const char __user *const __user *argv_user = (const char __user *const __user *)PT_REGS_PARM2(regs);
+	struct user_arg_ptr exec_argv = { .ptr.native = argv_user };
 	struct ksu_sulog_pending_event *pending_sucompat = NULL;
 	long ret, orig_regs[5];
 	int tmp_fd;
@@ -314,7 +545,7 @@ long ksu_handle_execve_sucompat(const char __user **filename_user, int orig_nr, 
 	if (unlikely(!*filename_user))
 		goto do_orig_execve;
 
-	if (likely(!ksu_sucompat_user_path_matches(*filename_user)))
+	if (likely(!ksu_sucompat_user_exec_path_matches(*filename_user)))
 		goto do_orig_execve;
 	if (!ksu_sucompat_current_allowed())
 		goto do_orig_execve;
@@ -340,6 +571,7 @@ long ksu_handle_execve_sucompat(const char __user **filename_user, int orig_nr, 
 	fd_install(tmp_fd, ksud_file);
 
 	pending_sucompat = ksu_sulog_capture_sucompat(*filename_user, argv_user, GFP_KERNEL);
+	ksu_sucompat_set_argv0_su(&exec_argv);
 	// execve(file, argv, environ)
 	// execveat(fd, file, argv, environ, flags)
 	orig_regs[0] = regs->__PT_PARM1_REG;
@@ -396,7 +628,7 @@ static inline int do_ksu_handle_execveat_sucompat(int *fd, const char *filename,
 		return 0;
 	if (!filename)
 		return 0;
-	if (likely(memcmp(filename, SU_PATH, sizeof(SU_PATH))))
+	if (likely(!ksu_sucompat_kernel_exec_path_matches(filename)))
 		return 0;
 	if (!ksu_sucompat_current_allowed())
 		return 0;
@@ -404,6 +636,7 @@ static inline int do_ksu_handle_execveat_sucompat(int *fd, const char *filename,
 	ksu_compat_sulog('x');
 	pr_info("do_execveat_common su found\n");
 	escape_with_root_profile();
+	ksu_sucompat_set_argv0_su(argv);
 
 	if (kern_path(KSUD_PATH, LOOKUP_FOLLOW, &kpath)) {
 		pr_info("sucompat: /data/adb/ksud not found, fallback to /system/bin/sh");
