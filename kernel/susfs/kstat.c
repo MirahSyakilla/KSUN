@@ -1,4 +1,5 @@
 #include <linux/cred.h>
+#include <linux/fdtable.h>
 #include <linux/fs.h>
 #ifdef KSU_SUSFS_HAS_GENERIC_RADIX_TREE
 #include <linux/generic-radix-tree.h>
@@ -51,7 +52,14 @@
 #include "susfs/kstat.h"
 #include "susfs/susfs.h"
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0) && defined(CONFIG_TRANSPARENT_HUGEPAGE)
+struct page *follow_trans_huge_pmd(struct vm_area_struct *vma,
+				   unsigned long addr, pmd_t *pmd,
+				   unsigned int flags);
+#endif
+
 #define KSU_SUSFS_KSTAT_HASH_BITS 8
+#define KSU_SUSFS_USER_CALLCHAIN_MAX 8
 
 struct ksu_susfs_kstat_entry {
 	struct hlist_node node;
@@ -223,6 +231,10 @@ static int (*ksu_susfs_orig_pid_smaps_rollup_open)(struct inode *inode,
 static ssize_t (*ksu_susfs_orig_pagemap_read)(struct file *file,
 					      char __user *buf, size_t count,
 					      loff_t *ppos);
+static int (*ksu_susfs_orig_fd_readlink)(struct dentry *dentry,
+					 char __user *buf, int buflen);
+static int (*ksu_susfs_orig_map_files_readlink)(struct dentry *dentry,
+						char __user *buf, int buflen);
 static int (*ksu_susfs_orig_map_files_iterate_shared)(struct file *file,
 						      struct dir_context *ctx);
 static struct dentry *(*ksu_susfs_orig_map_files_lookup)(
@@ -243,6 +255,8 @@ static bool ksu_susfs_smaps_ready;
 static bool ksu_susfs_smaps_rollup_ready;
 #endif
 static bool ksu_susfs_pagemap_ready;
+static bool ksu_susfs_fd_readlink_ready;
+static bool ksu_susfs_map_files_readlink_ready;
 static bool ksu_susfs_map_files_iterate_ready;
 static bool ksu_susfs_map_files_lookup_ready;
 static bool ksu_susfs_map_files_d_revalidate_ready;
@@ -250,6 +264,8 @@ static bool ksu_susfs_mem_read_ready;
 static bool ksu_susfs_mem_write_ready;
 static int ksu_susfs_kstat_rule_count;
 static int ksu_susfs_sus_map_rule_count;
+static const struct inode_operations *ksu_susfs_fd_link_iops;
+static const struct inode_operations *ksu_susfs_map_files_link_iops;
 static const struct file_operations *ksu_susfs_map_files_fops;
 static const struct inode_operations *ksu_susfs_map_files_iops;
 static const struct dentry_operations *ksu_susfs_map_files_dops;
@@ -273,6 +289,9 @@ static instantiate_t *ksu_susfs_map_files_instantiate;
  * /proc/<pid>/mem patching were found to destabilize LSPosed preload mappings
  * during live-device testing, so we keep those stock for now.
  */
+static const bool ksu_susfs_sus_map_fd_readlink_enabled = true;
+static const bool ksu_susfs_sus_map_map_files_readlink_enabled = true;
+static const bool ksu_susfs_sus_map_proc_maps_enabled = true;
 static const bool ksu_susfs_sus_map_map_files_lookup_enabled = false;
 static const bool ksu_susfs_sus_map_proc_mem_enabled = false;
 /*
@@ -285,6 +304,10 @@ static const bool ksu_susfs_sus_map_smaps_rollup_enabled = false;
 #endif
 static const bool ksu_susfs_sus_map_pagemap_enabled = false;
 static const bool ksu_susfs_sus_map_map_files_iterate_enabled = false;
+
+static bool
+ksu_susfs_current_callchain_from_sus_map_locked(struct mm_struct *locked_mm);
+static bool ksu_susfs_current_callchain_from_sus_map(void);
 
 static bool ksu_susfs_kstat_compat_root_allowed(void)
 {
@@ -330,10 +353,16 @@ static bool ksu_susfs_sus_map_should_hide_current(void)
 	return ksu_susfs_proc_mm_view_allowed_current();
 }
 
+static bool ksu_susfs_sus_map_should_hide_maps_current(void)
+{
+	return ksu_susfs_sus_map_proc_maps_enabled &&
+	       ksu_susfs_sus_map_should_hide_current();
+}
+
 static bool ksu_susfs_proc_maps_view_enabled_current(void)
 {
 	if (ksu_susfs_kstat_should_spoof_current() ||
-	    ksu_susfs_sus_map_should_hide_current()) {
+	    ksu_susfs_sus_map_should_hide_maps_current()) {
 		return true;
 	}
 
@@ -587,6 +616,23 @@ static bool ksu_susfs_sus_map_match_vma(struct vm_area_struct *vma)
 	}
 
 	return ksu_susfs_sus_map_match_inode(file_inode(vma->vm_file));
+}
+
+static bool ksu_susfs_sus_map_hide_vma_current(struct vm_area_struct *vma,
+					       struct mm_struct *locked_mm)
+{
+	return ksu_susfs_sus_map_should_hide_maps_current() &&
+	       ksu_susfs_sus_map_match_vma(vma) &&
+	       !ksu_susfs_current_callchain_from_sus_map_locked(locked_mm);
+}
+
+static bool ksu_susfs_sus_map_match_file(struct file *file)
+{
+	if (!file) {
+		return false;
+	}
+
+	return ksu_susfs_sus_map_match_inode(file_inode(file));
 }
 
 static int ksu_susfs_kstat_vfs_getattr_entry(struct kretprobe_instance *ri,
@@ -988,6 +1034,55 @@ static void ksu_susfs_restore_iop_lookup(
 	*old_lookup = NULL;
 }
 
+static int ksu_susfs_patch_iop_readlink(
+	const struct inode_operations *iops,
+	int (*new_readlink)(struct dentry *, char __user *, int),
+	int (**old_readlink)(struct dentry *, char __user *, int))
+{
+	int (*orig_readlink)(struct dentry *dentry, char __user *buf,
+			     int buflen);
+	void *dst;
+
+	if (!iops || !new_readlink) {
+		return -EINVAL;
+	}
+
+	orig_readlink = READ_ONCE(iops->readlink);
+	if (!orig_readlink) {
+		return -EINVAL;
+	}
+
+	if (old_readlink) {
+		*old_readlink = orig_readlink;
+	}
+
+	dst = (void *)&((struct inode_operations *)iops)->readlink;
+	return ksu_patch_text(dst, &new_readlink, sizeof(new_readlink),
+			      KSU_PATCH_TEXT_FLUSH_DCACHE);
+}
+
+static void ksu_susfs_restore_iop_readlink(
+	const struct inode_operations *iops,
+	int (**old_readlink)(struct dentry *, char __user *, int))
+{
+	int (*orig_readlink)(struct dentry *dentry, char __user *buf,
+			     int buflen);
+	void *dst;
+
+	if (!iops || !old_readlink || !*old_readlink) {
+		return;
+	}
+
+	orig_readlink = *old_readlink;
+	dst = (void *)&((struct inode_operations *)iops)->readlink;
+	if (ksu_patch_text(dst, &orig_readlink, sizeof(orig_readlink),
+			   KSU_PATCH_TEXT_FLUSH_DCACHE)) {
+		pr_err("susfs: failed to restore inode readlink\n");
+	}
+
+	*old_readlink = NULL;
+}
+
 static int ksu_susfs_patch_dop_d_revalidate(
 	const struct dentry_operations *dops,
 	int (*new_d_revalidate)(struct dentry *, unsigned int),
@@ -1168,16 +1263,22 @@ ksu_susfs_m_next_vma(struct proc_maps_private *priv, struct vm_area_struct *vma)
 {
 	struct vm_area_struct *next;
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
 	if (vma == priv->tail_vma) {
 		return NULL;
 	}
+#endif
 
 	next = ksu_susfs_next_vma(priv->mm, vma);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
 	if (next) {
 		return next;
 	}
 
 	return priv->tail_vma;
+#else
+	return next;
+#endif
 }
 
 static void ksu_susfs_m_cache_vma(struct seq_file *m, struct vm_area_struct *vma)
@@ -1299,7 +1400,7 @@ static void ksu_susfs_show_map_vma(struct seq_file *m,
 	dev_t dev = 0;
 	const char *name = NULL;
 
-	if (ksu_susfs_sus_map_match_vma(vma)) {
+	if (ksu_susfs_sus_map_hide_vma_current(vma, vma ? vma->vm_mm : NULL)) {
 		return;
 	}
 
@@ -1376,7 +1477,7 @@ static int ksu_susfs_show_map(struct seq_file *m, void *v)
 	}
 
 	vma = ksu_susfs_get_data_vma(orig_vma);
-	if (ksu_susfs_sus_map_match_vma(vma)) {
+	if (ksu_susfs_sus_map_hide_vma_current(vma, vma ? vma->vm_mm : NULL)) {
 		ksu_susfs_m_cache_vma(m, orig_vma);
 		ksu_susfs_put_data_vma(orig_vma, vma);
 		return 0;
@@ -1496,7 +1597,7 @@ static int ksu_susfs_show_smap(struct seq_file *m, void *v)
 	}
 
 	vma = ksu_susfs_get_data_vma(orig_vma);
-	if (ksu_susfs_sus_map_match_vma(vma)) {
+	if (ksu_susfs_sus_map_hide_vma_current(vma, vma ? vma->vm_mm : NULL)) {
 		ksu_susfs_m_cache_vma(m, orig_vma);
 		ksu_susfs_put_data_vma(orig_vma, vma);
 		return 0;
@@ -1723,11 +1824,18 @@ static int ksu_susfs_smaps_pte_range(pmd_t *pmd, unsigned long addr,
 		goto out;
 	}
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+	pte = pte_offset_map_lock(vma->vm_mm, pmd, addr, &ptl);
+	if (!pte) {
+		walk->action = ACTION_AGAIN;
+		goto out;
+	}
+#else
 	if (pmd_trans_unstable(pmd)) {
 		goto out;
 	}
-
 	pte = pte_offset_map_lock(vma->vm_mm, pmd, addr, &ptl);
+#endif
 	for (; addr != end; pte++, addr += PAGE_SIZE) {
 		ksu_susfs_smaps_pte_entry(pte, addr, walk);
 	}
@@ -1934,7 +2042,7 @@ static int ksu_susfs_show_smaps_rollup(struct seq_file *m, void *v)
 
 	for (vma = ksu_susfs_first_vma(mm); vma;
 	     vma = ksu_susfs_next_vma(mm, vma)) {
-		if (ksu_susfs_sus_map_match_vma(vma)) {
+		if (ksu_susfs_sus_map_hide_vma_current(vma, mm)) {
 			last_vma_end = vma->vm_end;
 			continue;
 		}
@@ -2095,6 +2203,210 @@ static ssize_t ksu_susfs_pagemap_read(struct file *file, char __user *buf,
 	return total;
 }
 
+static bool ksu_susfs_fd_is_hidden(struct task_struct *task, unsigned int fd)
+{
+	struct files_struct *files;
+	struct file *fd_file;
+	bool hidden = false;
+
+	if (!task) {
+		return false;
+	}
+
+	files = get_files_struct(task);
+	if (!files) {
+		return false;
+	}
+
+	spin_lock(&files->file_lock);
+	fd_file = fcheck_files(files, fd);
+	if (fd_file) {
+		hidden = ksu_susfs_sus_map_match_file(fd_file);
+	}
+	spin_unlock(&files->file_lock);
+	put_files_struct(files);
+	return hidden;
+}
+
+static bool ksu_susfs_proc_fd_dentry_hidden(struct dentry *dentry)
+{
+	struct task_struct *task;
+	struct dentry *parent;
+	unsigned int fd;
+	bool hidden;
+
+	if (!dentry) {
+		return false;
+	}
+
+	parent = READ_ONCE(dentry->d_parent);
+	if (!parent || parent == dentry || parent->d_name.len != 2 ||
+	    memcmp(parent->d_name.name, "fd", 2)) {
+		return false;
+	}
+
+	fd = name_to_int(&dentry->d_name);
+	if (fd == ~0U) {
+		return false;
+	}
+
+	task = get_proc_task(d_inode(dentry));
+	if (!task) {
+		return false;
+	}
+
+	hidden = ksu_susfs_fd_is_hidden(task, fd);
+	put_task_struct(task);
+	return hidden;
+}
+
+static int ksu_susfs_copy_fake_link(char __user *buf, int buflen)
+{
+	static const char fake[] = "anon_inode:[eventfd]";
+	int len;
+
+	if (buflen <= 0) {
+		return 0;
+	}
+
+	len = min_t(int, buflen, sizeof(fake) - 1);
+	return copy_to_user(buf, fake, len) ? -EFAULT : len;
+}
+
+#ifdef __aarch64__
+struct ksu_susfs_user_frame {
+	unsigned long fp;
+	unsigned long lr;
+};
+
+static int ksu_susfs_collect_user_callchain(unsigned long *pcs, int max)
+{
+	struct pt_regs *regs = current_pt_regs();
+	struct mm_struct *mm = current->mm;
+	unsigned long fp;
+	unsigned long sp;
+	unsigned long last_fp = 0;
+	int nr = 0;
+	int i;
+
+	if (!regs || !mm || max <= 0) {
+		return 0;
+	}
+
+	pcs[nr++] = untagged_addr(PT_REGS_IP(regs));
+	if (nr < max) {
+		pcs[nr++] = untagged_addr(PT_REGS_RET(regs));
+	}
+
+	fp = untagged_addr(PT_REGS_FP(regs));
+	sp = untagged_addr(PT_REGS_SP(regs));
+	for (i = 0; i < KSU_SUSFS_USER_CALLCHAIN_MAX && nr < max; i++) {
+		struct ksu_susfs_user_frame frame;
+
+		if (!fp || fp >= mm->task_size || (fp & 0xf)) {
+			break;
+		}
+		if (sp && fp < sp) {
+			break;
+		}
+		if (last_fp && fp <= last_fp) {
+			break;
+		}
+		if (fp + sizeof(frame) < fp ||
+		    fp + sizeof(frame) > mm->task_size) {
+			break;
+		}
+		if (copy_from_user_nofault(&frame,
+					   (const void __user *)fp,
+					   sizeof(frame))) {
+			break;
+		}
+
+		pcs[nr++] = untagged_addr(frame.lr);
+		last_fp = fp;
+		fp = untagged_addr(frame.fp);
+	}
+
+	return nr;
+}
+
+static bool
+ksu_susfs_current_callchain_from_sus_map_locked(struct mm_struct *locked_mm)
+{
+	unsigned long pcs[KSU_SUSFS_USER_CALLCHAIN_MAX + 2];
+	struct mm_struct *mm = current->mm;
+	struct vm_area_struct *vma;
+	bool have_lock;
+	int nr;
+	int i;
+	bool matched = false;
+
+	if (!mm) {
+		return false;
+	}
+
+	nr = ksu_susfs_collect_user_callchain(pcs, ARRAY_SIZE(pcs));
+	if (!nr) {
+		return false;
+	}
+	have_lock = locked_mm == mm;
+	if (!have_lock && ksu_susfs_mmap_read_lock_killable(mm)) {
+		return false;
+	}
+
+	for (i = 0; i < nr; i++) {
+		unsigned long addr = pcs[i];
+
+		if (!addr || addr >= mm->task_size) {
+			continue;
+		}
+
+		vma = find_vma(mm, addr);
+		if (vma && addr >= vma->vm_start &&
+		    ksu_susfs_sus_map_match_vma(vma)) {
+			matched = true;
+			break;
+		}
+	}
+
+	if (!have_lock) {
+		ksu_susfs_mmap_read_unlock(mm);
+	}
+	return matched;
+}
+
+static bool ksu_susfs_current_callchain_from_sus_map(void)
+{
+	return ksu_susfs_current_callchain_from_sus_map_locked(NULL);
+}
+#else
+static bool
+ksu_susfs_current_callchain_from_sus_map_locked(struct mm_struct *locked_mm)
+{
+	return false;
+}
+
+static bool ksu_susfs_current_callchain_from_sus_map(void)
+{
+	return false;
+}
+#endif
+
+static int ksu_susfs_fd_readlink(struct dentry *dentry, char __user *buf,
+				 int buflen)
+{
+	if (!ksu_susfs_orig_fd_readlink) {
+		return -ENOSYS;
+	}
+	if (ksu_susfs_sus_map_should_hide_current() &&
+	    ksu_susfs_proc_fd_dentry_hidden(dentry) &&
+	    !ksu_susfs_current_callchain_from_sus_map()) {
+		return ksu_susfs_copy_fake_link(buf, buflen);
+	}
+
+	return ksu_susfs_orig_fd_readlink(dentry, buf, buflen);
+}
+
 static int ksu_susfs_dname_to_vma_addr(struct dentry *dentry,
 				       unsigned long *start,
 				       unsigned long *end)
@@ -2135,6 +2447,53 @@ static int ksu_susfs_dname_to_vma_addr(struct dentry *dentry,
 	*start = sval;
 	*end = eval;
 	return 0;
+}
+
+static bool ksu_susfs_map_files_dentry_hidden(struct dentry *dentry)
+{
+	struct task_struct *task;
+	struct mm_struct *mm;
+	struct vm_area_struct *vma;
+	unsigned long vm_start;
+	unsigned long vm_end;
+	bool hidden = false;
+
+	if (!dentry || ksu_susfs_dname_to_vma_addr(dentry, &vm_start, &vm_end)) {
+		return false;
+	}
+
+	task = get_proc_task(d_inode(dentry));
+	if (!task) {
+		return false;
+	}
+
+	mm = mm_access(task, PTRACE_MODE_READ_FSCREDS);
+	if (!IS_ERR_OR_NULL(mm)) {
+		if (!ksu_susfs_mmap_read_lock_killable(mm)) {
+			vma = find_exact_vma(mm, vm_start, vm_end);
+			hidden = vma && vma->vm_file &&
+				 ksu_susfs_sus_map_match_vma(vma);
+			ksu_susfs_mmap_read_unlock(mm);
+		}
+		mmput(mm);
+	}
+	put_task_struct(task);
+	return hidden;
+}
+
+static int ksu_susfs_map_files_readlink(struct dentry *dentry,
+					char __user *buf, int buflen)
+{
+	if (!ksu_susfs_orig_map_files_readlink) {
+		return -ENOSYS;
+	}
+	if (ksu_susfs_sus_map_should_hide_current() &&
+	    ksu_susfs_map_files_dentry_hidden(dentry) &&
+	    !ksu_susfs_current_callchain_from_sus_map()) {
+		return ksu_susfs_copy_fake_link(buf, buflen);
+	}
+
+	return ksu_susfs_orig_map_files_readlink(dentry, buf, buflen);
 }
 
 static int ksu_susfs_map_files_d_revalidate(struct dentry *dentry,
@@ -2904,6 +3263,41 @@ int ksu_susfs_kstat_init(void)
 		}
 	}
 
+	if (ksu_susfs_sus_map_fd_readlink_enabled) {
+		ksu_susfs_fd_link_iops = &proc_pid_link_inode_operations;
+		err = ksu_susfs_patch_iop_readlink(
+			ksu_susfs_fd_link_iops, ksu_susfs_fd_readlink,
+			&ksu_susfs_orig_fd_readlink);
+		if (err) {
+			pr_warn("susfs: proc fd readlink wrapper unavailable: %d\n",
+				err);
+		} else {
+			ksu_susfs_fd_readlink_ready = true;
+		}
+		if (!ksu_susfs_fd_readlink_ready) {
+			ksu_susfs_fd_link_iops = NULL;
+		}
+	}
+
+	if (ksu_susfs_sus_map_map_files_readlink_enabled) {
+		addr = find_kernel_symbol_exact("proc_map_files_link_inode_operations");
+		if (addr) {
+			ksu_susfs_map_files_link_iops =
+				(const struct inode_operations *)addr;
+			err = ksu_susfs_patch_iop_readlink(
+				ksu_susfs_map_files_link_iops,
+				ksu_susfs_map_files_readlink,
+				&ksu_susfs_orig_map_files_readlink);
+			if (err) {
+				pr_warn("susfs: proc map_files readlink wrapper unavailable: %d\n",
+					err);
+				ksu_susfs_map_files_link_iops = NULL;
+			} else {
+				ksu_susfs_map_files_readlink_ready = true;
+			}
+		}
+	}
+
 	if (ksu_susfs_sus_map_map_files_iterate_enabled) {
 		ksu_susfs_map_files_instantiate =
 			(instantiate_t *)ksu_resolve_symbol_for_functable_hook(
@@ -3013,6 +3407,21 @@ void ksu_susfs_kstat_exit(void)
 		ksu_susfs_mem_read_ready = false;
 	}
 	ksu_susfs_mem_fops = NULL;
+
+	if (ksu_susfs_fd_readlink_ready) {
+		ksu_susfs_restore_iop_readlink(ksu_susfs_fd_link_iops,
+					       &ksu_susfs_orig_fd_readlink);
+		ksu_susfs_fd_readlink_ready = false;
+	}
+	ksu_susfs_fd_link_iops = NULL;
+
+	if (ksu_susfs_map_files_readlink_ready) {
+		ksu_susfs_restore_iop_readlink(
+			ksu_susfs_map_files_link_iops,
+			&ksu_susfs_orig_map_files_readlink);
+		ksu_susfs_map_files_readlink_ready = false;
+	}
+	ksu_susfs_map_files_link_iops = NULL;
 
 	if (ksu_susfs_map_files_lookup_ready) {
 		ksu_susfs_restore_iop_lookup(ksu_susfs_map_files_iops,

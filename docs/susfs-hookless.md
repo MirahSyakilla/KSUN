@@ -158,9 +158,13 @@ Today the live hookless coverage is intentionally limited to:
 
 - `/proc/*/maps`
 - `/proc/*/smaps`
+- `/proc/*/fd` readlink targets
+- `/proc/*/map_files` readlink targets
 
-This is the stable subset that was validated without the earlier BRENE crash
-path.
+This masks `sus_map` backing paths from link-target scanners while keeping the
+underlying proc fd/map_files symlinks followable for Zygisk-style loader and
+module handoff. The previously unstable direct map_files lookup/revalidate and
+`/proc/<pid>/mem` paths remain untouched.
 
 ### Cmdline, uname, AVC, and property hygiene
 
@@ -203,7 +207,8 @@ still covered.
 
 ### Partial or intentionally narrow
 
-- `sus_map` currently targets `maps` and `smaps` only
+- `sus_map` direct `map_files` lookup/revalidate and `/proc/<pid>/mem` hiding
+  remain disabled pending narrower live validation
 - `/proc/bootconfig` is not implemented on this Lisa 5.4 target because the
   kernel exposes `/proc/cmdline` but not `/proc/bootconfig`
 - procfs rewriting is scoped to app and isolated readers that are already under

@@ -1504,7 +1504,8 @@ static bool ksu_susfs_handle_features_compat(void __user *arg)
 			 sizeof(cmd->enabled_features) - len,
 			 "sus_map\nspoof_cmdline_or_bootconfig\nspoof_uname\n"
 			 "avc_log_spoofing\nproc_maps_kstat\nproc_smaps_kstat\n"
-			 "proc_maps_hide\nproc_smaps_hide\n");
+			 "proc_maps_hide\nproc_smaps_hide\nproc_fd_hide\n"
+			 "proc_map_files_hide\n");
 	if (copy_to_user(arg, cmd, sizeof(*cmd))) {
 		pr_err("susfs: feature compat copy_to_user failed\n");
 	}
