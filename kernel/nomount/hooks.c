@@ -31,6 +31,15 @@ static inline void regs_set_return_value(struct pt_regs *regs,
 #define KSU_NOMOUNT_EMBEDDED_NAME_MAX \
 	(KSU_NOMOUNT_MAX_PATH - offsetof(struct filename, iname))
 
+static inline void ksu_nomount_filename_ref_init(struct filename *name)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+	atomic_set(&name->refcnt, 1);
+#else
+	name->refcnt = 1;
+#endif
+}
+
 /*
  * These are deliberately complete replacements for the two filename
  * constructors.  Calling the original through an entry redirect would recurse,
@@ -86,7 +95,7 @@ static struct filename *notrace ksu_nomount_getname_flags(
 		}
 	}
 
-	result->refcnt = 1;
+	ksu_nomount_filename_ref_init(result);
 	if (unlikely(!len)) {
 		if (empty)
 			*empty = 1;
@@ -131,7 +140,7 @@ static struct filename *notrace ksu_nomount_getname_kernel(
 	memcpy((char *)result->name, filename, len);
 	result->uptr = NULL;
 	result->aname = NULL;
-	result->refcnt = 1;
+	ksu_nomount_filename_ref_init(result);
 	result = ksu_nomount_handle_getname(result);
 	if (!IS_ERR(result))
 		audit_getname(result);

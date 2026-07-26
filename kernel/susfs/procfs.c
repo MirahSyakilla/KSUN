@@ -1,6 +1,9 @@
 #include <linux/cred.h>
 #include <linux/version.h>
 #include <linux/fdtable.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+#include <linux/filelock.h>
+#endif
 #include <linux/fs.h>
 #include <linux/hashtable.h>
 #include <linux/init.h>

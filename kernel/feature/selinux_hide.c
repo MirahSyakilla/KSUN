@@ -95,9 +95,25 @@ static inline struct page *ksu_get_status_page(void) {
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
-static int security_context_to_sid_with_policy(struct selinux_policy *policy, const char *scontext, u32 scontext_len, u32 *sid, u32 def_sid, gfp_t gfp_flags);
-static int security_sid_to_context_with_policy(struct selinux_policy *policy, u32 sid, char **scontext, u32 *scontext_len);
-static void security_compute_av_user_with_policy(struct selinux_policy *policy, u32 ssid, u32 tsid, u16 tclass, struct av_decision *avd);
+static inline int ksu_hide_context_to_sid(const char *scontext,
+					  u32 scontext_len, u32 *sid,
+					  u32 def_sid, gfp_t gfp_flags)
+{
+	return security_context_to_sid_default(scontext, scontext_len, sid,
+					       def_sid, gfp_flags);
+}
+
+static inline int ksu_hide_sid_to_context(u32 sid, char **scontext,
+					  u32 *scontext_len)
+{
+	return security_sid_to_context(sid, scontext, scontext_len);
+}
+
+static inline void ksu_hide_compute_av_user(u32 ssid, u32 tsid, u16 tclass,
+					    struct av_decision *avd)
+{
+	security_compute_av_user(ssid, tsid, tclass, avd);
+}
 
 #elif defined(KSU_COMPAT_USE_SELINUX_STATE)
 static struct selinux_state fake_state;
@@ -544,9 +560,9 @@ static ssize_t my_write_context(struct file *file, char *buf, size_t size)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
     length = avc_has_perm(current_sid(), SECINITSID_SECURITY, SECCLASS_SECURITY, SECURITY__CHECK_CONTEXT, NULL);
     if (length) goto out;
-    length = security_context_to_sid_with_policy(backup_sepolicy, buf, size, &sid, SECSID_NULL, GFP_KERNEL);
+    length = ksu_hide_context_to_sid(buf, size, &sid, SECSID_NULL, GFP_KERNEL);
     if (length) goto out;
-    length = security_sid_to_context_with_policy(backup_sepolicy, sid, &canon, &len);
+    length = ksu_hide_sid_to_context(sid, &canon, &len);
 
 #elif defined(KSU_COMPAT_USE_SELINUX_STATE)
     length = avc_has_perm(&selinux_state, current_sid(), SECINITSID_SECURITY, SECCLASS_SECURITY, SECURITY__CHECK_CONTEXT, NULL);
@@ -612,11 +628,11 @@ static ssize_t my_write_access(struct file *file, char *buf, size_t size)
     }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
-    length = security_context_to_sid_with_policy(backup_sepolicy, scon, strlen(scon), &ssid, SECSID_NULL, GFP_KERNEL);
+    length = ksu_hide_context_to_sid(scon, strlen(scon), &ssid, SECSID_NULL, GFP_KERNEL);
     if (length) goto out;
-    length = security_context_to_sid_with_policy(backup_sepolicy, tcon, strlen(tcon), &tsid, SECSID_NULL, GFP_KERNEL);
+    length = ksu_hide_context_to_sid(tcon, strlen(tcon), &tsid, SECSID_NULL, GFP_KERNEL);
     if (length) goto out;
-    security_compute_av_user_with_policy(backup_sepolicy, ssid, tsid, tclass, &avd);
+    ksu_hide_compute_av_user(ssid, tsid, tclass, &avd);
 
 #elif defined(KSU_COMPAT_USE_SELINUX_STATE)
     length = security_context_str_to_sid(&fake_state, scon, &ssid, GFP_KERNEL);
@@ -693,7 +709,7 @@ int __nocfi ksu_handle_selinux_setprocattr(struct task_struct *p, char *name, vo
         }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
-        error = security_context_to_sid_with_policy(backup_sepolicy, str, size, &sid, SECSID_NULL, GFP_KERNEL);
+        error = ksu_hide_context_to_sid(str, size, &sid, SECSID_NULL, GFP_KERNEL);
 #elif defined(KSU_COMPAT_USE_SELINUX_STATE)
         error = security_context_to_sid(&fake_state, str, size, &sid, GFP_KERNEL);
 #else
