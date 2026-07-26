@@ -2203,6 +2203,18 @@ static ssize_t ksu_susfs_pagemap_read(struct file *file, char __user *buf,
 	return total;
 }
 
+static __always_inline struct file *
+ksu_susfs_files_lookup_fd_locked(struct files_struct *files, unsigned int fd)
+{
+	struct fdtable *fdt = files_fdtable(files);
+
+	if (unlikely(fd >= fdt->max_fds))
+		return NULL;
+
+	fd = array_index_nospec(fd, fdt->max_fds);
+	return rcu_dereference_check_fdtable(files, fdt->fd[fd]);
+}
+
 static bool ksu_susfs_fd_is_hidden(struct task_struct *task, unsigned int fd)
 {
 	struct files_struct *files;
@@ -2219,7 +2231,7 @@ static bool ksu_susfs_fd_is_hidden(struct task_struct *task, unsigned int fd)
 	}
 
 	spin_lock(&files->file_lock);
-	fd_file = fcheck_files(files, fd);
+	fd_file = ksu_susfs_files_lookup_fd_locked(files, fd);
 	if (fd_file) {
 		hidden = ksu_susfs_sus_map_match_file(fd_file);
 	}
