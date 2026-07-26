@@ -44,27 +44,9 @@
 #include "hook/syscall_event_bridge.h"
 #include "compat/kernel_compat.h"
 
-#ifdef CONFIG_KSU_KPROBES_SUSFS
-#define KSU_SUSFS_PROP_CAPTURE_RC                                             \
-	"on post-fs-data\n"                                                   \
-	"    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- /system/bin/sh -c "     \
-	"\"mkdir -p /data/adb/ksu; "                                          \
-	": > /data/adb/ksu/prop_hygiene_baseline; "                           \
-	"/system/bin/getprop ro.build.version.known_codenames "               \
-	">> /data/adb/ksu/prop_hygiene_baseline; "                            \
-	"printf '\\n' >> /data/adb/ksu/prop_hygiene_baseline; "               \
-	"/system/bin/getprop ro.product.ab_ota_partitions "                   \
-	">> /data/adb/ksu/prop_hygiene_baseline; "                            \
-	"printf '\\n' >> /data/adb/ksu/prop_hygiene_baseline\"\n"             \
-	"\n"
-#else
-#define KSU_SUSFS_PROP_CAPTURE_RC ""
-#endif
-
 // clang-format off
 static const char KERNEL_SU_RC[] =
     "\n"
-    KSU_SUSFS_PROP_CAPTURE_RC
     "on post-fs-data\n"
     "    start logd\n"
     // We should wait for the post-fs-data finish

@@ -157,7 +157,8 @@ static DECLARE_DELAYED_WORK(ksu_susfs_prop_hygiene_restore_work,
 
 static char ksu_susfs_prop_hygiene_restore_script[] =
 	"RP=/data/adb/ksu/bin/resetprop; "
-	"BASE=/data/adb/ksu/prop_hygiene_baseline; "
+	"BASE=/metadata/watchdog/ksu/prop_hygiene_baseline; "
+	"[ -f \"$BASE\" ] || BASE=/metadata/ksu/prop_hygiene_baseline; "
 	"[ -x \"$RP\" ] && [ -f \"$BASE\" ] || exit 1; "
 	"CN=`sed -n '1p' \"$BASE\"`; "
 	"AB=`sed -n '2p' \"$BASE\"`; "
