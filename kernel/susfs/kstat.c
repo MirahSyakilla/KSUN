@@ -2225,18 +2225,17 @@ static bool ksu_susfs_fd_is_hidden(struct task_struct *task, unsigned int fd)
 		return false;
 	}
 
-	files = get_files_struct(task);
-	if (!files) {
-		return false;
+	task_lock(task);
+	files = task->files;
+	if (files) {
+		spin_lock(&files->file_lock);
+		fd_file = ksu_susfs_files_lookup_fd_locked(files, fd);
+		if (fd_file) {
+			hidden = ksu_susfs_sus_map_match_file(fd_file);
+		}
+		spin_unlock(&files->file_lock);
 	}
-
-	spin_lock(&files->file_lock);
-	fd_file = ksu_susfs_files_lookup_fd_locked(files, fd);
-	if (fd_file) {
-		hidden = ksu_susfs_sus_map_match_file(fd_file);
-	}
-	spin_unlock(&files->file_lock);
-	put_files_struct(files);
+	task_unlock(task);
 	return hidden;
 }
 
