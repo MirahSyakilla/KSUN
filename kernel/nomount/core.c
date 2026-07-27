@@ -742,7 +742,7 @@ static struct ksu_nomount_rule *ksu_nomount_find_rule_locked(const char *path)
  * pathname lookup, so first reject names whose basename is not present in any
  * rule.  The final full-path lookup still decides the policy.
  */
-static bool ksu_nomount_relative_rule_may_match(const char *path, size_t len)
+bool ksu_nomount_relative_rule_may_match(const char *path, size_t len)
 {
 	const char *name;
 	struct ksu_nomount_rule *rule;

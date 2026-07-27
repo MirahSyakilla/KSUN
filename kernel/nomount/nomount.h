@@ -65,6 +65,7 @@ struct kstatfs;
 struct path;
 struct vm_area_struct;
 
+bool ksu_nomount_relative_rule_may_match(const char *path, size_t len);
 void ksu_nomount_init(void);
 void ksu_nomount_exit(void);
 

@@ -440,6 +440,62 @@ static int __nocfi ksu_vfs_fstatat(int dfd, const char __user *filename,
 }
 #endif
 
+#if defined(CONFIG_KSU_KPROBES_NOMOUNT) && \
+	LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+/*
+ * Android 6.1 LTO can inline vfs_fstatat() into newfstatat(), leaving the
+ * branch-link stat hook on vfs_statx() after getname_flags() has already run.
+ * Rebuild only candidate dirfd-relative names so NoMount/SUSFS can see the dfd.
+ */
+static __always_inline bool ksu_nomount_statx_relative_may_match(
+	const char *path)
+{
+	bool nomount_active;
+	bool susfs_active;
+	size_t len;
+
+	if (unlikely(!path || !path[0]))
+		return false;
+	if (likely(path[0] == '/'))
+		return false;
+
+	nomount_active = ksu_nomount_active_for_current();
+	susfs_active = ksu_susfs_path_filter_active();
+	if (!nomount_active && !susfs_active)
+		return false;
+
+	len = strlen(path);
+	if (nomount_active && ksu_nomount_relative_rule_may_match(path, len))
+		return true;
+	if (susfs_active && ksu_susfs_relative_hide_rule_may_match(path, len))
+		return true;
+
+	return false;
+}
+
+static __always_inline struct filename *ksu_nomount_rebase_statx_filename(
+	int dfd, struct filename *filename)
+{
+	struct ksu_nomount_lookup_scope lookup_scope;
+	struct filename *rebased;
+	const char *path;
+
+	if (likely(dfd == AT_FDCWD))
+		return NULL;
+	if (unlikely(!filename || IS_ERR(filename)))
+		return NULL;
+	path = filename->name;
+	if (!ksu_nomount_statx_relative_may_match(path))
+		return NULL;
+
+	ksu_nomount_lookup_scope_enter(&lookup_scope, dfd);
+	rebased = getname_kernel(path);
+	ksu_nomount_lookup_scope_exit(&lookup_scope);
+
+	return rebased;
+}
+#endif
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 18, 0)
 static int (*vfs_statx_fn)(int dfd, struct filename *filename, int flags,
 			   struct kstat *stat, u32 request_mask);
@@ -447,11 +503,29 @@ static int __nocfi ksu_vfs_statx(int dfd, struct filename *filename,
 				 int flags, struct kstat *stat,
 				 u32 request_mask)
 {
+	struct filename *lookup_name = filename;
+	struct filename *rebased = NULL;
 	int ret;
 
 	if (filename && !IS_ERR(filename))
 		ksu_handle_stat_kernel_filename((char *)filename->name);
-	ret = vfs_statx_fn(dfd, filename, flags, stat, request_mask);
+#if defined(CONFIG_KSU_KPROBES_NOMOUNT) && \
+	LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+	rebased = ksu_nomount_rebase_statx_filename(dfd, filename);
+	if (IS_ERR(rebased)) {
+		ret = PTR_ERR(rebased);
+		ksu_bl_handle_stat_result(stat, ret);
+		return ret;
+	}
+	if (rebased)
+		lookup_name = rebased;
+#endif
+	ret = vfs_statx_fn(dfd, lookup_name, flags, stat, request_mask);
+#if defined(CONFIG_KSU_KPROBES_NOMOUNT) && \
+	LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+	if (rebased)
+		putname(rebased);
+#endif
 	ksu_bl_handle_stat_result(stat, ret);
 	return ret;
 }
