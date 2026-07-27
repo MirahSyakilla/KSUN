@@ -29,6 +29,7 @@
 #include "feature/selinux_hide.h"
 #include "feature/sulog.h"
 #include "infra/symbol_resolver.h"
+#include "selinux/execmem_compat.h"
 #ifdef CONFIG_KSU_KPROBES_SUSFS
 #include "susfs/susfs.h"
 #endif
@@ -150,6 +151,7 @@ int __init kernelsu_init(void)
 
 #ifdef CONFIG_KSU_KPROBES_HOOK
 	ksu_lsm_hook_init();
+	ksu_execmem_compat_init();
 #else
 	ksu_lsm_hook_built_in_init();
 #endif
@@ -250,6 +252,7 @@ void __exit kernelsu_exit(void)
 	ksu_selinux_hide_exit();
 
 #ifdef CONFIG_KSU_KPROBES_HOOK
+	ksu_execmem_compat_exit();
 	ksu_lsm_hook_exit();
 #endif
 

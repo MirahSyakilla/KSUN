@@ -8,6 +8,7 @@
 #include "klog.h" // IWYU pragma: keep
 #include "runtime/ksud_boot.h"
 #include "runtime/ksud.h"
+#include "selinux/execmem_compat.h"
 #include "manager/manager_observer.h"
 #include "manager/throne_tracker.h"
 #ifdef CONFIG_KSU_KPROBES_SUSFS
@@ -35,6 +36,7 @@ void on_post_fs_data(void)
     ksu_observer_init();
     // Sanity check for safe mode only needs early-boot input samples.
     ksu_stop_input_hook_runtime();
+    ksu_execmem_compat_refresh();
     ksu_selinux_hide_handle_post_fs_data();
 }
 
@@ -65,6 +67,7 @@ void on_module_mounted(void)
 {
     pr_info("on_module_mounted!\n");
     ksu_module_mounted = true;
+    ksu_execmem_compat_refresh();
 }
 
 void on_boot_completed(void)
