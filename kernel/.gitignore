@@ -1,4 +1,5 @@
 .cache/
+.ksu_git_version
 .thinlto-cache/
 compile_commands.json
 *.ko

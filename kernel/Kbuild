@@ -330,9 +330,19 @@ obj-$(CONFIG_KSU) += kernelsu.o
 
 LPATH := /usr/bin/env PATH="$$PATH":/usr/bin:/usr/local/bin
 MDIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+KSU_VERSION_FILE := $(MDIR)/.ksu_git_version
 
-# Check if this is a git repository
-# Try to detect Git repo intelligently
+# Bazel/Kleaf sandboxes may flatten the KernelSU-Next symlink and omit .git.
+# A generated local stamp lets those builds keep the real manager-facing version.
+ifneq ($(wildcard $(KSU_VERSION_FILE)),)
+KSU_GIT_VERSION := $(shell sed -n '1p' $(KSU_VERSION_FILE))
+KSU_GIT_TAG := $(shell sed -n '2p' $(KSU_VERSION_FILE))
+ifneq ($(KSU_GIT_VERSION),)
+KSU_GIT_VERSION_VALID := 1
+$(info -- KernelSU-Next version stamp detected at: $(KSU_VERSION_FILE))
+endif
+else
+# Check if this is a git repository and only use it when it is separate from the kernel.
 GIT_ROOT := $(shell cd $(MDIR) && $(LPATH) git rev-parse --show-toplevel 2>/dev/null)
 ifneq ($(GIT_ROOT),)
 KERNEL_GIT_ROOT := $(shell cd $(srctree) && $(LPATH) git rev-parse --show-toplevel 2>/dev/null)
@@ -343,6 +353,7 @@ KSU_GIT_VERSION := $(shell cd $(GIT_ROOT) && $(LPATH) git rev-list --count HEAD 
 KSU_GIT_TAG := $(shell cd $(GIT_ROOT) && $(LPATH) git describe --tags --abbrev=0 2>/dev/null)
 KSU_GIT_VERSION_VALID := 1
 $(info -- KernelSU-Next Git repo detected at: $(GIT_ROOT))
+endif
 endif
 endif
 
