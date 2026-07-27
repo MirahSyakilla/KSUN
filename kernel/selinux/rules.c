@@ -51,6 +51,8 @@ static void ksu_guardrail_deny_execmem(struct policydb *db)
 
     if (!ksu_exists(db, "system_server")) return;
 
+    ksu_deny_effective(db, "system_server", "system_server", "process",
+                       "execmem");
     for (i = 0; i < ARRAY_SIZE(ksu_guarded_app_sources); i++) {
         const char *source_type = ksu_guarded_app_sources[i];
 

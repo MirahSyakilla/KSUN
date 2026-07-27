@@ -30,6 +30,8 @@ bool ksu_allow(struct policydb *db, const char *src, const char *tgt,
                const char *cls, const char *perm);
 bool ksu_deny(struct policydb *db, const char *src, const char *tgt,
               const char *cls, const char *perm);
+bool ksu_deny_effective(struct policydb *db, const char *src, const char *tgt,
+                        const char *cls, const char *perm);
 bool ksu_auditallow(struct policydb *db, const char *src, const char *tgt,
                     const char *cls, const char *perm);
 bool ksu_dontaudit(struct policydb *db, const char *src, const char *tgt,

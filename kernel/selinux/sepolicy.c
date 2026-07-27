@@ -289,6 +289,88 @@ static bool add_rule(struct policydb *db, const char *s, const char *t,
     return add_rule_raw(db, src, tgt, cls, perm, effect, invert);
 }
 
+static struct ebitmap *ksu_type_attr_map(struct policydb *db,
+                                         struct type_datum *type)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0) || \
+    defined(KSU_COMPAT_HAS_MODERN_POLICYDB)
+    return &db->type_attr_map_array[type->value - 1];
+#elif defined(KSU_COMPAT_IS_HISI_LEGACY_HM2)
+    return flex_array_get(db->type_attr_map_array, type->value - 1);
+#elif defined(KSU_COMPAT_IS_HISI_LEGACY)
+    return &db->type_attr_map[type->value - 1];
+#else
+    return flex_array_get(db->type_attr_map_array, type->value - 1);
+#endif
+}
+
+bool ksu_deny_effective(struct policydb *db, const char *s, const char *t,
+                        const char *c, const char *p)
+{
+    struct type_datum *src;
+    struct type_datum *tgt;
+    struct class_datum *cls;
+    struct perm_datum *perm;
+    struct ebitmap *sattr;
+    struct ebitmap *tattr;
+    struct ebitmap_node *snode;
+    struct ebitmap_node *tnode;
+    unsigned int i;
+    unsigned int j;
+    u32 perm_mask;
+    bool success = true;
+
+    src = symtab_search(&db->p_types, s);
+    if (!src) {
+        pr_info("source type %s does not exist\n", s);
+        return false;
+    }
+    tgt = symtab_search(&db->p_types, t);
+    if (!tgt) {
+        pr_info("target type %s does not exist\n", t);
+        return false;
+    }
+    cls = symtab_search(&db->p_classes, c);
+    if (!cls) {
+        pr_info("class %s does not exist\n", c);
+        return false;
+    }
+    perm = symtab_search(&cls->permissions, p);
+    if (!perm && cls->comdatum)
+        perm = symtab_search(&cls->comdatum->permissions, p);
+    if (!perm || !perm->value || perm->value > 32) {
+        pr_info("perm %s does not exist in class %s\n", p, c);
+        return false;
+    }
+
+    sattr = ksu_type_attr_map(db, src);
+    tattr = ksu_type_attr_map(db, tgt);
+    if (!sattr || !tattr)
+        return false;
+
+    perm_mask = 1U << (perm->value - 1);
+    ebitmap_for_each_positive_bit(sattr, snode, i) {
+        ebitmap_for_each_positive_bit(tattr, tnode, j) {
+            struct avtab_key key;
+            struct avtab_node *node;
+
+            key.source_type = i + 1;
+            key.target_type = j + 1;
+            key.target_class = cls->value;
+            key.specified = AVTAB_ALLOWED;
+
+            node = avtab_search_node(&db->te_avtab, &key);
+            if (!node)
+                continue;
+            node->datum.u.data &= ~perm_mask;
+            if (is_redundant_avtab_node(node))
+                success &= remove_avtab_node(db, node);
+        }
+    }
+
+    return success;
+}
+
 static bool add_rule_raw(struct policydb *db, struct type_datum *src, struct type_datum *tgt, struct class_datum *cls,
                          struct perm_datum *perm, int effect, bool invert)
 {

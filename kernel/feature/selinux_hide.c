@@ -377,6 +377,8 @@ static void ksu_hide_filter_access_decision(struct av_decision *avd,
     ksu_hide_clear_perm(avd, scon, tcon, tclass, "adbd",
                         "adbroot", "binder", "call");
 
+    ksu_hide_clear_perm(avd, scon, tcon, tclass, "system_server",
+                        "system_server", "process", "execmem");
     ksu_hide_clear_perm_for_sources(avd, scon, tcon, tclass,
                                     app_query_sources,
                                     ARRAY_SIZE(app_query_sources),
