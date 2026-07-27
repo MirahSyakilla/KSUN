@@ -2,13 +2,16 @@
 set -eu
 
 GKI_ROOT=$(pwd)
+KSU_DIR="KernelSU-Next"
+KSU_REMOTE="https://github.com/MirahSyakilla/KSUN"
+KSU_BRANCH="susfs+nomount-hookless"
 
 display_usage() {
     echo "Usage: $0 [--cleanup | <commit-or-tag>]"
     echo "  --cleanup:              Cleans up previous modifications made by the script."
     echo "  <commit-or-tag>:        Sets up or updates the KernelSU-Next to specified tag or commit."
     echo "  -h, --help:             Displays this usage information."
-    echo "  (no args):              Sets up or updates the KernelSU-Next environment to the latest tagged version."
+    echo "  (no args):              Sets up or updates KernelSU-Next from the susfs+nomount-hookless branch."
 }
 
 initialize_variables() {
@@ -31,28 +34,29 @@ perform_cleanup() {
     [ -L "$DRIVER_DIR/kernelsu" ] && rm "$DRIVER_DIR/kernelsu" && echo "[-] Symlink removed."
     grep -q "kernelsu" "$DRIVER_MAKEFILE" && sed -i '/kernelsu/d' "$DRIVER_MAKEFILE" && echo "[-] Makefile reverted."
     grep -q "drivers/kernelsu/Kconfig" "$DRIVER_KCONFIG" && sed -i '/drivers\/kernelsu\/Kconfig/d' "$DRIVER_KCONFIG" && echo "[-] Kconfig reverted."
-    if [ -d "$GKI_ROOT/KernelSU-Next" ]; then
-        rm -rf "$GKI_ROOT/KernelSU-Next" && echo "[-] KernelSU-Next directory deleted."
+    if [ -d "$GKI_ROOT/$KSU_DIR" ]; then
+        rm -rf "$GKI_ROOT/$KSU_DIR" && echo "[-] $KSU_DIR directory deleted."
     fi
 }
 
 # Sets up or update KernelSU-Next environment
 setup_kernelsu() {
-    echo "[+] Setting up KernelSU-Next..."
-    test -d "$GKI_ROOT/KernelSU-Next" || git clone https://github.com/KernelSU-Next/KernelSU-Next && echo "[+] Repository cloned."
-    cd "$GKI_ROOT/KernelSU-Next"
-    git stash && echo "[-] Stashed current changes."
-    if [ "$(git status | grep -Po 'v\d+(\.\d+)*' | head -n1)" ]; then
-        git checkout next && echo "[-] Switched to next branch."
+    echo "[+] Setting up $KSU_DIR..."
+    if ! test -d "$GKI_ROOT/$KSU_DIR"; then
+        git clone -b "$KSU_BRANCH" "$KSU_REMOTE" "$GKI_ROOT/$KSU_DIR" && echo "[+] Repository cloned."
     fi
-    git pull && echo "[+] Repository updated."
+    cd "$GKI_ROOT/$KSU_DIR"
+    git remote set-url origin "$KSU_REMOTE"
+    git stash && echo "[-] Stashed current changes."
+
+    git fetch --tags origin "$KSU_BRANCH" && echo "[+] Repository updated."
     if [ -z "${1-}" ]; then
-        git checkout "$(git describe --abbrev=0 --tags)" && echo "[-] Checked out latest tag."
+        git checkout -B "$KSU_BRANCH" "origin/$KSU_BRANCH" && echo "[-] Switched to $KSU_BRANCH branch."
     else
         git checkout "$1" && echo "[-] Checked out $1." || echo "[-] Checkout default branch"
     fi
     cd "$DRIVER_DIR"
-    ln -sf "$(realpath --relative-to="$DRIVER_DIR" "$GKI_ROOT/KernelSU-Next/kernel")" "kernelsu" && echo "[+] Symlink created."
+    ln -sf "$(realpath --relative-to="$DRIVER_DIR" "$GKI_ROOT/$KSU_DIR/kernel")" "kernelsu" && echo "[+] Symlink created."
 
     # Add entries in Makefile and Kconfig if not already existing
     grep -q "kernelsu" "$DRIVER_MAKEFILE" || printf "\nobj-\$(CONFIG_KSU) += kernelsu/\n" >> "$DRIVER_MAKEFILE" && echo "[+] Modified Makefile."
