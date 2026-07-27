@@ -5,10 +5,12 @@
 void ksu_execmem_compat_init(void);
 void ksu_execmem_compat_exit(void);
 void ksu_execmem_compat_refresh(void);
+void ksu_execmem_compat_seal(void);
 #else
 static inline void ksu_execmem_compat_init(void) { }
 static inline void ksu_execmem_compat_exit(void) { }
 static inline void ksu_execmem_compat_refresh(void) { }
+static inline void ksu_execmem_compat_seal(void) { }
 #endif
 
 #endif /* __KSU_H_EXECMEM_COMPAT */
