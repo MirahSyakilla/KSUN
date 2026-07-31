@@ -24,6 +24,7 @@
 #include <linux/proc_fs.h>
 #include <linux/proc_ns.h>
 #include <linux/ptrace.h>
+#include <linux/rbtree.h>
 #include <linux/sched.h>
 #include <linux/security.h>
 #include <linux/seq_file.h>
@@ -68,6 +69,8 @@
 #define KSU_SUSFS_ISOLATED_NS_MAX_ATTEMPTS 16
 #define KSU_SUSFS_ISOLATED_NS_MAX_CMDLINE 256
 #define KSU_SUSFS_ISOLATED_NS_MAX_CANDIDATES 64
+#define KSU_SUSFS_CMDLINE_USE_PROC_SHOW_HOOK \
+	(LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0))
 
 extern const struct file_operations proc_mounts_operations;
 extern const struct file_operations proc_mountinfo_operations;
@@ -114,6 +117,7 @@ static char ksu_susfs_fake_cmdline[KSU_SUSFS_FAKE_CMDLINE_OR_BOOTCONFIG_SIZE];
 static struct ksu_susfs_uname_cmd ksu_susfs_fake_uname;
 static char *ksu_susfs_orig_saved_command_line;
 static char *ksu_susfs_cmdline_shadow;
+static const char *ksu_susfs_cmdline_active;
 
 static int (*ksu_susfs_orig_mounts_open)(struct inode *inode, struct file *file);
 static int (*ksu_susfs_orig_mountinfo_open)(struct inode *inode,
@@ -138,6 +142,11 @@ static struct kretprobe *ksu_susfs_mntns_get_rp;
 static struct kprobe *ksu_susfs_cleanup_mnt_kp;
 static DEFINE_MUTEX(ksu_susfs_cmdline_patch_lock);
 static bool ksu_susfs_cmdline_ready;
+#if KSU_SUSFS_CMDLINE_USE_PROC_SHOW_HOOK
+static bool ksu_susfs_cmdline_show_hook_ready;
+static struct proc_dir_entry *ksu_susfs_cmdline_pde;
+static int (*ksu_susfs_orig_cmdline_show)(struct seq_file *m, void *v);
+#endif
 static bool ksu_susfs_mount_runtime_ready;
 static bool ksu_susfs_uname_hook_ready;
 static bool ksu_susfs_mount_window_open;
@@ -1728,8 +1737,119 @@ err_out:
 	return err;
 }
 
+#if KSU_SUSFS_CMDLINE_USE_PROC_SHOW_HOOK
+static struct proc_dir_entry *
+ksu_susfs_find_proc_root_entry(const char *name, unsigned int len)
+{
+	struct rb_node *node = proc_root.subdir.rb_node;
+
+	while (node) {
+		struct proc_dir_entry *de =
+			rb_entry(node, struct proc_dir_entry, subdir_node);
+		int result;
+
+		if (len < de->namelen) {
+			result = -1;
+		} else if (len > de->namelen) {
+			result = 1;
+		} else {
+			result = memcmp(name, de->name, len);
+		}
+
+		if (result < 0) {
+			node = node->rb_left;
+		} else if (result > 0) {
+			node = node->rb_right;
+		} else {
+			return de;
+		}
+	}
+
+	return NULL;
+}
+
+static int ksu_susfs_cmdline_show(struct seq_file *m, void *v)
+{
+	const char *cmdline = READ_ONCE(ksu_susfs_cmdline_active);
+
+	if (!cmdline) {
+		cmdline = READ_ONCE(ksu_susfs_orig_saved_command_line);
+	}
+	if (!cmdline) {
+		cmdline = READ_ONCE(saved_command_line);
+	}
+
+	if (cmdline) {
+		seq_puts(m, cmdline);
+	}
+	seq_putc(m, '\n');
+	return 0;
+}
+
+static int ksu_susfs_cmdline_show_hook_enable(void)
+{
+	struct proc_dir_entry *de;
+	int (*show)(struct seq_file *m, void *v);
+
+	if (READ_ONCE(ksu_susfs_cmdline_show_hook_ready)) {
+		return 0;
+	}
+
+	de = ksu_susfs_find_proc_root_entry("cmdline",
+					    sizeof("cmdline") - 1);
+	if (!de) {
+		return -ENOENT;
+	}
+
+	show = READ_ONCE(de->single_show);
+	if (!show) {
+		return -ENOENT;
+	}
+	if (show == ksu_susfs_cmdline_show) {
+		WRITE_ONCE(ksu_susfs_cmdline_show_hook_ready, true);
+		return 0;
+	}
+
+	if (!ksu_susfs_orig_cmdline_show) {
+		ksu_susfs_orig_cmdline_show = show;
+	}
+	WRITE_ONCE(de->single_show, ksu_susfs_cmdline_show);
+	WRITE_ONCE(ksu_susfs_cmdline_pde, de);
+	WRITE_ONCE(ksu_susfs_cmdline_show_hook_ready, true);
+	return 0;
+}
+
+static void ksu_susfs_cmdline_show_hook_disable(void)
+{
+	struct proc_dir_entry *de = READ_ONCE(ksu_susfs_cmdline_pde);
+	int (*show)(struct seq_file *m, void *v) =
+		READ_ONCE(ksu_susfs_orig_cmdline_show);
+
+	if (de && show &&
+	    READ_ONCE(de->single_show) == ksu_susfs_cmdline_show) {
+		WRITE_ONCE(de->single_show, show);
+	}
+
+	WRITE_ONCE(ksu_susfs_cmdline_show_hook_ready, false);
+	WRITE_ONCE(ksu_susfs_cmdline_pde, NULL);
+	WRITE_ONCE(ksu_susfs_orig_cmdline_show, NULL);
+}
+#else
+static inline int ksu_susfs_cmdline_show_hook_enable(void)
+{
+	return 0;
+}
+
+static inline void ksu_susfs_cmdline_show_hook_disable(void)
+{
+}
+#endif
+
 static int __ksu_susfs_cmdline_runtime_enable_locked(void)
 {
+	const char *cmdline;
+	int err;
+
 	if (!READ_ONCE(saved_command_line)) {
 		return -ENOENT;
 	}
@@ -1751,11 +1871,20 @@ static int __ksu_susfs_cmdline_runtime_enable_locked(void)
 	    ksu_susfs_fake_cmdline[0]) {
 		strscpy(ksu_susfs_cmdline_shadow, ksu_susfs_fake_cmdline,
 			sizeof(ksu_susfs_fake_cmdline));
-		WRITE_ONCE(saved_command_line, ksu_susfs_cmdline_shadow);
+		cmdline = ksu_susfs_cmdline_shadow;
 	} else {
-		WRITE_ONCE(saved_command_line, ksu_susfs_orig_saved_command_line);
+		cmdline = ksu_susfs_orig_saved_command_line;
 	}
 
+	err = ksu_susfs_cmdline_show_hook_enable();
+	if (err) {
+		return err;
+	}
+
+	WRITE_ONCE(ksu_susfs_cmdline_active, cmdline);
+#if !KSU_SUSFS_CMDLINE_USE_PROC_SHOW_HOOK
+	WRITE_ONCE(saved_command_line, (char *)cmdline);
+#endif
 	ksu_susfs_cmdline_ready = true;
 	return 0;
 }
@@ -1788,13 +1917,20 @@ static void ksu_susfs_cmdline_runtime_disable(void)
 {
 	cancel_delayed_work_sync(&ksu_susfs_cmdline_retry_work);
 	mutex_lock(&ksu_susfs_cmdline_patch_lock);
+	WRITE_ONCE(ksu_susfs_cmdline_active,
+		   ksu_susfs_orig_saved_command_line);
+#if !KSU_SUSFS_CMDLINE_USE_PROC_SHOW_HOOK
 	if (ksu_susfs_orig_saved_command_line) {
 		WRITE_ONCE(saved_command_line,
 			   ksu_susfs_orig_saved_command_line);
 	}
+#else
+	ksu_susfs_cmdline_show_hook_disable();
+#endif
 	kfree(ksu_susfs_cmdline_shadow);
 	ksu_susfs_cmdline_shadow = NULL;
 	ksu_susfs_orig_saved_command_line = NULL;
+	ksu_susfs_cmdline_active = NULL;
 	ksu_susfs_cmdline_ready = false;
 	ksu_susfs_cmdline_last_err = 0;
 	mutex_unlock(&ksu_susfs_cmdline_patch_lock);
