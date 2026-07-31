@@ -330,11 +330,18 @@ ccflags-y += -I$(KSU_KERNEL_DIR) -I$(KSU_KERNEL_DIR)/include
 obj-$(CONFIG_KSU) += kernelsu.o
 
 LPATH := /usr/bin/env PATH="$$PATH":/usr/bin:/usr/local/bin
-MDIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+KSU_MAKEFILE := $(lastword $(MAKEFILE_LIST))
+KSU_MAKEFILE_REAL := $(realpath $(KSU_MAKEFILE))
+ifneq ($(KSU_MAKEFILE_REAL),)
+MDIR := $(dir $(KSU_MAKEFILE_REAL))
+else
+MDIR := $(dir $(abspath $(KSU_MAKEFILE)))
+endif
 KSU_VERSION_FILE := $(MDIR)/.ksu_git_version
 
 # Bazel/Kleaf sandboxes may flatten the KernelSU-Next symlink and omit .git.
-# A generated local stamp lets those builds keep the real manager-facing version.
+# kernel/setup.sh refreshes this stamp automatically so those builds keep the
+# real manager-facing version.
 ifneq ($(wildcard $(KSU_VERSION_FILE)),)
 KSU_GIT_VERSION := $(shell sed -n '1p' $(KSU_VERSION_FILE))
 KSU_GIT_TAG := $(shell sed -n '2p' $(KSU_VERSION_FILE))
@@ -371,7 +378,7 @@ $(info -- KernelSU-Next version: $(KSU_VERSION))
 ccflags-y += -DKSU_VERSION=$(KSU_VERSION)
 else
 # If there is no .git directory, use default version
-$(warning "KSU_GIT_VERSION not defined! It is better to make KernelSU-Next a git repository!")
+$(warning "KSU_GIT_VERSION not defined! Run kernel/setup.sh or make KernelSU-Next a git repository!")
 KSU_VERSION_FALLBACK := 1
 $(info -- KernelSU-Next version fallback: $(KSU_VERSION_FALLBACK))
 ccflags-y += -DKSU_VERSION=$(KSU_VERSION_FALLBACK)
@@ -382,7 +389,7 @@ $(eval KSU_VERSION_TAG=$(KSU_GIT_TAG))
 $(info -- KernelSU-Next tag: $(KSU_VERSION_TAG))
 ccflags-y += -DKSU_VERSION_TAG=\"$(KSU_VERSION_TAG)\"
 else
-$(warning "KSU_VERSION_TAG not defined! It is better to fetch KernelSU-Next tags or provide a version stamp!")
+$(warning "KSU_VERSION_TAG not defined! Run kernel/setup.sh or fetch KernelSU-Next tags/provide a version stamp!")
 KSU_VERSION_TAG_FALLBACK := v0.0.1
 $(info -- KernelSU-Next tag fallback: $(KSU_VERSION_TAG_FALLBACK))
 ccflags-y += -DKSU_VERSION_TAG=\"$(KSU_VERSION_TAG_FALLBACK)\"

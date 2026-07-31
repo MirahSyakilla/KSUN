@@ -12,6 +12,7 @@ display_usage() {
     echo "  <commit-or-tag>:        Sets up or updates the KernelSU-Next to specified tag or commit."
     echo "  -h, --help:             Displays this usage information."
     echo "  (no args):              Sets up or updates KernelSU-Next from the susfs+nomount-hookless branch."
+    echo "                          The KernelSU version stamp is refreshed automatically."
 }
 
 initialize_variables() {
@@ -26,6 +27,33 @@ initialize_variables() {
 
     DRIVER_MAKEFILE=$DRIVER_DIR/Makefile
     DRIVER_KCONFIG=$DRIVER_DIR/Kconfig
+}
+
+refresh_version_stamp() {
+    VERSION_STAMP="$GKI_ROOT/$KSU_DIR/kernel/.ksu_git_version"
+
+    if ! git -C "$GKI_ROOT/$KSU_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        echo "[-] $KSU_DIR is not a git checkout; version stamp left untouched."
+        return 0
+    fi
+
+    KSU_VERSION=$(git -C "$GKI_ROOT/$KSU_DIR" rev-list --count HEAD 2>/dev/null || true)
+    if [ -z "$KSU_VERSION" ]; then
+        echo "[!] Unable to derive KernelSU-Next version from git."
+        return 0
+    fi
+
+    KSU_TAG=$(git -C "$GKI_ROOT/$KSU_DIR" describe --tags --abbrev=0 2>/dev/null || true)
+    {
+        printf '%s\n' "$KSU_VERSION"
+        printf '%s\n' "$KSU_TAG"
+    } > "$VERSION_STAMP.tmp" && mv "$VERSION_STAMP.tmp" "$VERSION_STAMP"
+
+    if [ -n "$KSU_TAG" ]; then
+        echo "[+] KernelSU-Next version stamp refreshed: $KSU_VERSION / $KSU_TAG."
+    else
+        echo "[+] KernelSU-Next version stamp refreshed: $KSU_VERSION."
+    fi
 }
 
 # Reverts modifications made by this script
@@ -55,6 +83,7 @@ setup_kernelsu() {
     else
         git checkout "$1" && echo "[-] Checked out $1." || echo "[-] Checkout default branch"
     fi
+    refresh_version_stamp
     cd "$DRIVER_DIR"
     ln -sf "$(realpath --relative-to="$DRIVER_DIR" "$GKI_ROOT/$KSU_DIR/kernel")" "kernelsu" && echo "[+] Symlink created."
 
