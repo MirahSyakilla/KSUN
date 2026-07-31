@@ -884,13 +884,18 @@ static int selinux_hide_feature_set(u64 value)
     int ret = 0;
     
     mutex_lock(&selinux_hide_mutex);
-    ksu_selinux_hide_enabled = enable;
     if (enable) {
         if (!ksu_selinux_hide_running) {
             ret = ksu_selinux_hide_enable();
-            if (!ret) ksu_selinux_hide_running = true;
+            if (!ret) {
+                ksu_selinux_hide_running = true;
+                ksu_selinux_hide_enabled = true;
+            }
+        } else {
+            ksu_selinux_hide_enabled = true;
         }
     } else {
+        ksu_selinux_hide_enabled = false;
         if (ksu_selinux_hide_running) {
             ksu_selinux_hide_disable();
             ksu_selinux_hide_running = false;

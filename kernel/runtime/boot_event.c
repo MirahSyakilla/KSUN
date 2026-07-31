@@ -68,6 +68,7 @@ void on_module_mounted(void)
     pr_info("on_module_mounted!\n");
     ksu_module_mounted = true;
     ksu_execmem_compat_refresh();
+    ksu_selinux_hide_drop_backup_if_unused();
 }
 
 void on_boot_completed(void)
@@ -76,7 +77,8 @@ void on_boot_completed(void)
     pr_info("on_boot_completed!\n");
     ksu_execmem_compat_seal();
     track_throne(true);
-    ksu_selinux_hide_drop_backup_if_unused();
+    if (ksu_module_mounted)
+        ksu_selinux_hide_drop_backup_if_unused();
     ksu_avc_spoof_late_init();
 #ifdef CONFIG_KSU_KPROBES_SUSFS
     ksu_susfs_handle_boot_completed();
