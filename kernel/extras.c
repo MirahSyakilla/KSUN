@@ -15,8 +15,9 @@
 // theres only one feature so far anyway
 // - xx, 20251019
 
-static u32 su_sid = 0;
-static u32 priv_app_sid = 0;
+static u32 ksu_spoof_sid __read_mostly;
+static u32 su_spoof_sid __read_mostly;
+static u32 priv_app_sid __read_mostly;
 static DEFINE_MUTEX(ksu_avc_spoof_lock);
 
 // init as disabled by default
@@ -27,8 +28,8 @@ void ksu_avc_spoof_disable();
 static int __ksu_avc_spoof_enable_locked(void);
 static void __ksu_avc_spoof_disable_locked(void);
 
-static bool ksu_avc_spoof_enabled = true;
-static bool boot_completed = false;
+static bool ksu_avc_spoof_enabled __read_mostly = true;
+static bool boot_completed __read_mostly;
 
 static int avc_spoof_feature_get(u64 *value)
 {
@@ -77,25 +78,30 @@ static const struct ksu_feature_handler avc_spoof_handler = {
 
 static int get_sid()
 {
-	/* KernelSU deployments use u:r:ksu:s0; retain the legacy su domain as
-	 * a fallback for policies that still label the daemon that way. */
-	static const char *const source_contexts[] = {
-		"u:r:ksu:s0",
-		"u:r:su:s0",
-	};
+	/* Some trees label KSU root as ksu, while others still audit su. */
 	int err = -ENOENT;
-	int i;
+	u32 sid;
 
-	for (i = 0; i < ARRAY_SIZE(source_contexts); i++) {
-		err = security_secctx_to_secid(source_contexts[i],
-					       strlen(source_contexts[i]), &su_sid);
-		if (!err) {
-			pr_info("avc_spoof/get_sid: source context %s, sid: %u\n",
-				source_contexts[i], su_sid);
-			break;
-		}
+	ksu_spoof_sid = 0;
+	su_spoof_sid = 0;
+
+	err = security_secctx_to_secid("u:r:ksu:s0", strlen("u:r:ksu:s0"),
+				       &sid);
+	if (!err) {
+		ksu_spoof_sid = sid;
+		pr_info("avc_spoof/get_sid: source context u:r:ksu:s0, sid: %u\n",
+			sid);
 	}
-	if (err) {
+
+	err = security_secctx_to_secid("u:r:su:s0", strlen("u:r:su:s0"),
+				       &sid);
+	if (!err) {
+		su_spoof_sid = sid;
+		pr_info("avc_spoof/get_sid: source context u:r:su:s0, sid: %u\n",
+			sid);
+	}
+
+	if (!ksu_spoof_sid && !su_spoof_sid) {
 		pr_info("avc_spoof/get_sid: ksu/su source sid not found\n");
 		return -1;
 	}
@@ -111,13 +117,16 @@ static int get_sid()
 
 int ksu_handle_slow_avc_audit(u32 *tsid)
 {
+	u32 sid;
+
 	if (atomic_read(&disable_spoof))
 		return 0;
 
-	// if tsid is su, we just replace it
-	// unsure if its enough, but this is how it is aye?
-	if (*tsid == su_sid) {
-		pr_info("avc_spoof/slow_avc_audit: replacing su_sid: %u with priv_app_sid: %u\n", su_sid, priv_app_sid);
+	// If the audited target is a KSU root domain, replace just that SID.
+	sid = *tsid;
+	if (sid == ksu_spoof_sid || sid == su_spoof_sid) {
+		pr_info_ratelimited("avc_spoof/slow_avc_audit: replacing root sid: %u with priv_app_sid: %u\n",
+				    sid, priv_app_sid);
 		*tsid = priv_app_sid;
 	}
 
