@@ -28,6 +28,12 @@ const struct cred *ksu_handle_faccessat(int *dfd,
 const struct cred *ksu_handle_stat(int *dfd,
 				   const char __user **filename_user,
 				   int *flags);
+const struct cred *ksu_handle_faccessat_su_path(int *dfd,
+					const char __user **filename_user,
+					int *mode, int *flags);
+const struct cred *ksu_handle_stat_su_path(int *dfd,
+				   const char __user **filename_user,
+				   int *flags);
 bool ksu_handle_stat_kernel_filename(char *filename);
 #endif
 

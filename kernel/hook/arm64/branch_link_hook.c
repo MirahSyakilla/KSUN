@@ -36,7 +36,13 @@
 #endif
 
 #define KSU_BL_SCAN_WIDTH (128 * sizeof(void *))
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+#define KSU_BL_CONSERVATIVE_RUNTIME_PATCHES 1
 #define KSU_BL_MAX_RECORDS 96
+#else
+#define KSU_BL_CONSERVATIVE_RUNTIME_PATCHES 0
+#define KSU_BL_MAX_RECORDS 160
+#endif
 #define KSU_AARCH64_BL_OPCODE 0x94000000U
 #define KSU_AARCH64_BL_MASK 0xfc000000U
 #define KSU_AARCH64_BRANCH_IMM_MASK 0x03ffffffU
@@ -320,8 +326,8 @@ static long __nocfi ksu_do_faccessat(int dfd, const char __user *filename,
 #endif
 
 	if (unlikely(ksu_su_compat_enabled && ksu_bl_user_path_is_su(filename)))
-		old_cred = ksu_handle_faccessat(&dfd, &filename, &mode,
-						&flags);
+		old_cred = ksu_handle_faccessat_su_path(&dfd, &filename,
+							&mode, &flags);
 #ifdef CONFIG_KSU_KPROBES_NOMOUNT
 	ksu_nomount_lookup_scope_enter(&lookup_scope, dfd);
 #endif
@@ -345,7 +351,8 @@ static long __nocfi ksu_do_faccessat(int dfd, const char __user *filename,
 #endif
 
 	if (unlikely(ksu_su_compat_enabled && ksu_bl_user_path_is_su(filename)))
-		old_cred = ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
+		old_cred = ksu_handle_faccessat_su_path(&dfd, &filename,
+							&mode, NULL);
 #ifdef CONFIG_KSU_KPROBES_NOMOUNT
 	ksu_nomount_lookup_scope_enter(&lookup_scope, dfd);
 #endif
@@ -358,6 +365,42 @@ static long __nocfi ksu_do_faccessat(int dfd, const char __user *filename,
 	return ret;
 }
 #endif
+
+static bool ksu_branch_link_patch_faccessat_family(void)
+{
+#if KSU_BL_CONSERVATIVE_RUNTIME_PATCHES
+	unsigned long caller = ksu_bl_lookup("__arm64_sys_faccessat");
+	unsigned long target = ksu_bl_lookup("do_faccessat");
+	int ret;
+
+	do_faccessat_fn = (void *)target;
+	ret = ksu_bl_record_patch("faccessat/do_faccessat", caller, target,
+				  (unsigned long)ksu_do_faccessat);
+	pr_info("branch_link: faccessat/do_faccessat: %d\n", ret);
+	return !ret;
+#else
+	static const char * const callers[] = {
+		"__arm64_sys_faccessat",
+		"__arm64_sys_faccessat2",
+#ifdef CONFIG_COMPAT
+		"__arm64_compat_sys_faccessat",
+		"__arm64_compat_sys_faccessat2",
+#endif
+	};
+	unsigned int found = 0;
+	unsigned int patched = 0;
+	unsigned long target = ksu_bl_lookup("do_faccessat");
+	int count;
+
+	do_faccessat_fn = (void *)target;
+	count = ksu_bl_record_patch_callers(
+		"faccessat/do_faccessat", callers, ARRAY_SIZE(callers), target,
+		(unsigned long)ksu_do_faccessat, &found, &patched);
+	pr_info("branch_link: faccessat family=%u/%u sites=%d\n", patched,
+		found, count);
+	return target && found && patched == found;
+#endif
+}
 
 #ifdef CONFIG_KSU_KPROBES_NOMOUNT
 static int (*do_readlinkat_fn)(int dfd, const char __user *pathname,
@@ -384,6 +427,10 @@ static bool ksu_branch_link_patch_readlink_family(void)
 	static const char * const callers[] = {
 		"__arm64_sys_readlinkat",
 		"__arm64_sys_readlink",
+#if defined(CONFIG_COMPAT) && !KSU_BL_CONSERVATIVE_RUNTIME_PATCHES
+		"__arm64_compat_sys_readlinkat",
+		"__arm64_compat_sys_readlink",
+#endif
 	};
 	unsigned long target = ksu_bl_lookup("do_readlinkat");
 	unsigned int found = 0;
@@ -425,7 +472,7 @@ static int __nocfi ksu_vfs_fstatat(int dfd, const char __user *filename,
 #endif
 
 	if (unlikely(ksu_su_compat_enabled && ksu_bl_user_path_is_su(filename)))
-		old_cred = ksu_handle_stat(&dfd, &filename, &flags);
+		old_cred = ksu_handle_stat_su_path(&dfd, &filename, &flags);
 #ifdef CONFIG_KSU_KPROBES_NOMOUNT
 	ksu_nomount_lookup_scope_enter(&lookup_scope, dfd);
 #endif
@@ -543,7 +590,7 @@ static int __nocfi ksu_vfs_statx(int dfd, const char __user *filename,
 #endif
 
 	if (unlikely(ksu_su_compat_enabled && ksu_bl_user_path_is_su(filename)))
-		old_cred = ksu_handle_stat(&dfd, &filename, &flags);
+		old_cred = ksu_handle_stat_su_path(&dfd, &filename, &flags);
 #ifdef CONFIG_KSU_KPROBES_NOMOUNT
 	ksu_nomount_lookup_scope_enter(&lookup_scope, dfd);
 #endif
@@ -680,31 +727,69 @@ static bool ksu_branch_link_patch_stat_path_family(void)
 
 	for (i = 0; i < ARRAY_SIZE(callers); i++) {
 		unsigned long caller = ksu_bl_lookup(callers[i]);
-		unsigned long target;
-		int ret;
+		bool caller_patched = false;
+		int ret = -ENOENT;
 
 		if (!caller)
 			continue;
 		found++;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
-		target = ksu_bl_lookup("vfs_fstatat");
-		vfs_fstatat_fn = (void *)target;
-		ret = ksu_bl_record_patch("stat-path/vfs_fstatat", caller,
-					  target, (unsigned long)ksu_vfs_fstatat);
-		if (ret) {
-			target = ksu_bl_lookup("vfs_statx");
+#if KSU_BL_CONSERVATIVE_RUNTIME_PATCHES
+		{
+			unsigned long target = ksu_bl_lookup("vfs_fstatat");
+
+			vfs_fstatat_fn = (void *)target;
+			ret = ksu_bl_record_patch("stat-path/vfs_fstatat",
+						  caller, target,
+						  (unsigned long)ksu_vfs_fstatat);
+			if (!ret)
+				caller_patched = true;
+		}
+		if (!caller_patched) {
+			unsigned long target = ksu_bl_lookup("vfs_statx");
+
 			vfs_statx_fn = (void *)target;
-			ret = ksu_bl_record_patch("stat-path/vfs_statx", caller,
-						  target,
+			ret = ksu_bl_record_patch("stat-path/vfs_statx",
+						  caller, target,
 						  (unsigned long)ksu_vfs_statx);
+			if (!ret)
+				caller_patched = true;
 		}
 #else
-		target = ksu_bl_lookup("vfs_statx");
-		vfs_statx_fn = (void *)target;
-		ret = ksu_bl_record_patch("stat-path/vfs_statx", caller,
-					  target, (unsigned long)ksu_vfs_statx);
+		{
+			unsigned long target = ksu_bl_lookup("vfs_fstatat");
+
+			vfs_fstatat_fn = (void *)target;
+			ret = ksu_bl_record_patch_all(
+				"stat-path/vfs_fstatat", caller, target,
+				(unsigned long)ksu_vfs_fstatat);
+			if (ret > 0)
+				caller_patched = true;
+		}
+		{
+			unsigned long target = ksu_bl_lookup("vfs_statx");
+
+			vfs_statx_fn = (void *)target;
+			ret = ksu_bl_record_patch_all(
+				"stat-path/vfs_statx", caller, target,
+				(unsigned long)ksu_vfs_statx);
+			if (ret > 0)
+				caller_patched = true;
+		}
 #endif
-		if (!ret)
+#else
+		{
+			unsigned long target = ksu_bl_lookup("vfs_statx");
+
+			vfs_statx_fn = (void *)target;
+			ret = ksu_bl_record_patch_all(
+				"stat-path/vfs_statx", caller, target,
+				(unsigned long)ksu_vfs_statx);
+			if (ret > 0)
+				caller_patched = true;
+		}
+#endif
+		if (caller_patched)
 			patched++;
 		else
 			pr_info("branch_link: stat path caller %s: %d\n",
@@ -1273,12 +1358,7 @@ int ksu_branch_link_patch_init(void)
 		return 0;
 	}
 
-	caller_addr = ksu_bl_lookup("__arm64_sys_faccessat");
-	target_addr = ksu_bl_lookup("do_faccessat");
-	do_faccessat_fn = (void *)target_addr;
-	ret = ksu_bl_record_patch("faccessat/do_faccessat", caller_addr,
-				  target_addr, (unsigned long)ksu_do_faccessat);
-	pr_info("branch_link: faccessat/do_faccessat: %d\n", ret);
+	ksu_branch_link_patch_faccessat_family();
 
 #ifdef CONFIG_KSU_KPROBES_NOMOUNT
 	ksu_branch_link_patch_readlink_family();

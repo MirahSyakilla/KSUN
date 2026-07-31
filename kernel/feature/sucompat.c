@@ -65,6 +65,7 @@
 #define KSU_SU_TAIL_MASK 0x00ffffffffffffffULL
 
 bool ksu_su_compat_enabled __read_mostly = true;
+static bool ksu_ksud_path_ready __read_mostly;
 
 static int su_compat_feature_get(u64 *value)
 {
@@ -376,6 +377,17 @@ static bool is_ksud_exists()
 	return true;
 }
 
+static __always_inline bool is_ksud_exists_cached(void)
+{
+	if (likely(ksu_ksud_path_ready))
+		return true;
+	if (!is_ksud_exists())
+		return false;
+
+	ksu_ksud_path_ready = true;
+	return true;
+}
+
 long ksu_handle_faccessat_sucompat(int orig_nr, struct pt_regs *regs)
 {
 	const char __user **filename_user, *orig_filename;
@@ -389,12 +401,11 @@ long ksu_handle_faccessat_sucompat(int orig_nr, struct pt_regs *regs)
 	if (!ksu_sucompat_current_allowed())
 		goto do_orig_facessat;
 	old_cred = override_creds(ksu_cred);
-	if (!is_ksud_exists()) {
+	if (!is_ksud_exists_cached()) {
 		revert_creds(old_cred);
 		goto do_orig_facessat;
 	}
 	ksu_compat_sulog('a');
-	pr_info("faccessat su->ksud!\n");
 	orig_filename = *filename_user;
 	*filename_user = ksud_user_path();
 	ret = ksu_invoke_syscall_nr(orig_nr, regs);
@@ -419,12 +430,11 @@ long ksu_handle_stat_sucompat(int orig_nr, struct pt_regs *regs)
 	if (!ksu_sucompat_current_allowed())
 		goto do_orig_stat;
 	old_cred = override_creds(ksu_cred);
-	if (!is_ksud_exists()) {
+	if (!is_ksud_exists_cached()) {
 		revert_creds(old_cred);
 		goto do_orig_stat;
 	}
 	ksu_compat_sulog('s');
-	pr_info("newfstatat su->ksud!\n");
 	orig_filename = *filename_user;
 	*filename_user = ksud_user_path();
 	ret = ksu_invoke_syscall_nr(orig_nr, regs);
@@ -437,12 +447,12 @@ do_orig_stat:
 }
 
 #ifdef CONFIG_KSU_HACK_ARM64_BRANCH_LINK
+static const struct cred *
+ksu_redirect_su_path_matched(const char __user **filename_user, char event);
+
 static const struct cred *ksu_redirect_su_path(const char __user **filename_user,
 					       char event)
 {
-	const char __user *new_filename;
-	const struct cred *old_cred;
-
 	if (unlikely(!ksu_su_compat_enabled))
 		return NULL;
 	if (!filename_user)
@@ -450,11 +460,23 @@ static const struct cred *ksu_redirect_su_path(const char __user **filename_user
 
 	if (likely(!ksu_sucompat_user_path_matches(*filename_user)))
 		return NULL;
+
+	return ksu_redirect_su_path_matched(filename_user, event);
+}
+
+static const struct cred *
+ksu_redirect_su_path_matched(const char __user **filename_user, char event)
+{
+	const char __user *new_filename;
+	const struct cred *old_cred;
+
+	if (!filename_user)
+		return NULL;
 	if (!ksu_sucompat_current_allowed())
 		return NULL;
 
 	old_cred = override_creds(ksu_cred);
-	if (!is_ksud_exists()) {
+	if (!is_ksud_exists_cached()) {
 		revert_creds(old_cred);
 		return NULL;
 	}
@@ -481,8 +503,20 @@ const struct cred *ksu_handle_faccessat(int *dfd,
 	(void)flags;
 
 	old_cred = ksu_redirect_su_path(filename_user, 'a');
-	if (old_cred)
-		pr_info("faccessat su->ksud!\n");
+	return old_cred;
+}
+
+const struct cred *ksu_handle_faccessat_su_path(int *dfd,
+					const char __user **filename_user,
+					int *mode, int *flags)
+{
+	const struct cred *old_cred;
+
+	(void)dfd;
+	(void)mode;
+	(void)flags;
+
+	old_cred = ksu_redirect_su_path_matched(filename_user, 'a');
 	return old_cred;
 }
 
@@ -496,8 +530,19 @@ const struct cred *ksu_handle_stat(int *dfd,
 	(void)flags;
 
 	old_cred = ksu_redirect_su_path(filename_user, 's');
-	if (old_cred)
-		pr_info("newfstatat su->ksud!\n");
+	return old_cred;
+}
+
+const struct cred *ksu_handle_stat_su_path(int *dfd,
+				   const char __user **filename_user,
+				   int *flags)
+{
+	const struct cred *old_cred;
+
+	(void)dfd;
+	(void)flags;
+
+	old_cred = ksu_redirect_su_path_matched(filename_user, 's');
 	return old_cred;
 }
 
@@ -516,7 +561,7 @@ bool ksu_handle_stat_kernel_filename(char *filename)
 		return false;
 
 	old_cred = override_creds(ksu_cred);
-	exists = is_ksud_exists();
+	exists = is_ksud_exists_cached();
 	revert_creds(old_cred);
 	if (!exists)
 		return false;
@@ -525,7 +570,6 @@ bool ksu_handle_stat_kernel_filename(char *filename)
 		return false;
 	ksu_compat_sulog('s');
 	memcpy(filename, KSUD_PATH, sizeof(KSUD_PATH));
-	pr_info("stat filename su->ksud!\n");
 	return true;
 }
 #endif
@@ -551,7 +595,6 @@ long ksu_handle_execve_sucompat(const char __user **filename_user, int orig_nr, 
 		goto do_orig_execve;
 
 	ksu_compat_sulog('x');
-	pr_info("sys_execve su found\n");
 
 	tmp_fd = get_unused_fd_flags(O_CLOEXEC);
 	if (tmp_fd < 0) {
@@ -634,7 +677,6 @@ static inline int do_ksu_handle_execveat_sucompat(int *fd, const char *filename,
 		return 0;
 
 	ksu_compat_sulog('x');
-	pr_info("do_execveat_common su found\n");
 	escape_with_root_profile();
 	ksu_sucompat_set_argv0_su(argv);
 
