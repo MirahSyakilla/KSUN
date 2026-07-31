@@ -1311,14 +1311,14 @@ int ksu_dup_policydb(struct policydb *old_db, struct policydb *new_db)
     // 4*2+8+4
     static const size_t kConfigOff = 20;
     if (len >= kConfigOff + sizeof(u32)) {
-        u32 *config_ptr = data + kConfigOff;
-#ifdef KSU_COMPAT_HAS_POLICYDB_CONFIG_ANDROID_NETLINK_ROUTE
+        u32 *config_ptr = (u32 *)((u8 *)data + kConfigOff);
+#ifdef POLICYDB_CONFIG_ANDROID_NETLINK_ROUTE
         if (old_db->android_netlink_route) {
             pr_info("adding POLICYDB_CONFIG_ANDROID_NETLINK_ROUTE\n");
             *config_ptr |= POLICYDB_CONFIG_ANDROID_NETLINK_ROUTE;
         }
 #endif
-#ifdef KSU_COMPAT_HAS_POLICYDB_CONFIG_ANDROID_NETLINK_GETNEIGH
+#ifdef POLICYDB_CONFIG_ANDROID_NETLINK_GETNEIGH
         if (old_db->android_netlink_getneigh) {
             pr_info("adding POLICYDB_CONFIG_ANDROID_NETLINK_GETNEIGH\n");
             *config_ptr |= POLICYDB_CONFIG_ANDROID_NETLINK_GETNEIGH;

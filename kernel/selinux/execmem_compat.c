@@ -270,13 +270,15 @@ void ksu_execmem_compat_seal(void)
 {
 	if (READ_ONCE(ksu_hma_execmem_sealed))
 		return;
-	if (!READ_ONCE(ksu_hma_execmem_hooked))
-		return;
-	if (!READ_ONCE(ksu_hma_allow_logged))
-		return;
-
-	pr_info("execmem_compat: sealing HMA system_server mprotect hook\n");
 	WRITE_ONCE(ksu_hma_execmem_sealed, true);
+
+	if (!READ_ONCE(ksu_hma_execmem_hooked)) {
+		WRITE_ONCE(ksu_hma_execmem_allowed, false);
+		return;
+	}
+
+	pr_info("execmem_compat: sealing HMA system_server mprotect hook%s\n",
+		READ_ONCE(ksu_hma_allow_logged) ? "" : " (unused)");
 	ksu_execmem_compat_enable_hook(false);
 }
 

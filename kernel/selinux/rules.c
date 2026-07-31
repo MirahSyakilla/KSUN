@@ -61,8 +61,31 @@ static void ksu_guardrail_deny_execmem(struct policydb *db)
     }
 }
 
+static void ksu_restore_android_ashmem_domain_access(struct policydb *db)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+    static const char * const rw_file_perms[] = {
+        "ioctl", "read", "write", "getattr",
+        "lock", "append", "map", "open",
+    };
+    size_t i;
+
+    if (!ksu_exists(db, "domain") ||
+        !ksu_exists(db, "ashmem_libcutils_device")) {
+        return;
+    }
+
+    for (i = 0; i < ARRAY_SIZE(rw_file_perms); i++) {
+        ksu_allow(db, "domain", "ashmem_libcutils_device", "chr_file",
+                  rw_file_perms[i]);
+    }
+#endif
+}
+
 static void ksu_apply_policy_guardrails(struct policydb *db)
 {
+    ksu_restore_android_ashmem_domain_access(db);
+
     if (ksu_exists(db, "fsck_untrusted") && ksu_exists(db, "sysadmin")) {
         ksu_deny(db, "fsck_untrusted", "sysadmin", ALL, ALL);
     }
