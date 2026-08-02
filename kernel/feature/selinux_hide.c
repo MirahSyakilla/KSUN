@@ -270,6 +270,17 @@ static bool ksu_hide_should_mask_context(const char *ctx, size_t ctx_len)
         "magisk_file",
         "xposed_data",
         "xposed_file",
+		"droidspaces",
+		"droidspacesd",
+        "msd_app",
+        "msd_daemon",
+        "droidspaces_file",
+        "droidspaces_exec",
+        "ds_file",
+        "ds_exec",
+        "container_file",
+        "untrusted_app_all",
+		
     };
 
     return ksu_context_type_is_any_bounded(ctx, ctx_len, hidden_types,
@@ -351,6 +362,7 @@ static void ksu_hide_filter_access_decision(struct av_decision *avd,
                                             const char *scon,
                                             const char *tcon, u16 tclass)
 {
+	
     static const char * const app_query_sources[] = {
         "untrusted_app",
         "untrusted_app_25",
@@ -376,8 +388,7 @@ static void ksu_hide_filter_access_decision(struct av_decision *avd,
                         "fsck_untrusted", "capability", "sys_admin");
     ksu_hide_clear_perm(avd, scon, tcon, tclass, "adbd",
                         "adbroot", "binder", "call");
-
-    ksu_hide_clear_perm(avd, scon, tcon, tclass, "system_server",
+	ksu_hide_clear_perm(avd, scon, tcon, tclass, "system_server",
                         "system_server", "process", "execmem");
     ksu_hide_clear_perm_for_sources(avd, scon, tcon, tclass,
                                     app_query_sources,
@@ -391,7 +402,35 @@ static void ksu_hide_filter_access_decision(struct av_decision *avd,
                                     app_query_sources,
                                     ARRAY_SIZE(app_query_sources),
                                     "lsposed_file", "file", "read");
-    ksu_hide_clear_perm(avd, scon, tcon, tclass, "dex2oat",
+	ksu_hide_clear_perm_for_sources(avd, scon, tcon, tclass,
+                                    app_query_sources,
+                                    ARRAY_SIZE(app_query_sources),
+                                    "droidspaces_file", "file", "read");
+    ksu_hide_clear_perm_for_sources(avd, scon, tcon, tclass,
+                                    app_query_sources,
+                                    ARRAY_SIZE(app_query_sources),
+                                    "droidspaces_file", "dir", "search");
+	ksu_hide_clear_perm_for_sources(avd, scon, tcon, tclass,
+                                    app_query_sources,
+                                    ARRAY_SIZE(app_query_sources),
+                                    "droidspaces", "process", "transition");
+    ksu_hide_clear_perm(avd, scon, tcon, tclass, "su",
+                        "droidspacesd", "process", "dyntransition");
+	ksu_hide_clear_perm(avd, scon, tcon, tclass, "system_server",
+                        "droidspacesd", "binder", "call");
+	ksu_hide_clear_perm(avd, scon, tcon, tclass, "msd_app",
+                        "msd_daemon", "unix_stream_socket", "connectto");
+	ksu_hide_clear_perm(avd, scon, tcon, tclass, "msd_daemon",
+                        "msd_daemon", "unix_stream_socket", "connectto");
+	ksu_hide_clear_perm(avd, scon, tcon, tclass, "msd_daemon",
+                        "selinuxfs", "filesystem", "read");
+    ksu_hide_clear_perm(avd, scon, tcon, tclass, "msd_daemon",
+                        "selinuxfs", "file", "read");
+	ksu_hide_clear_perm(avd, scon, tcon, tclass, "msd_daemon",
+                        "configfs", "dir", "search");
+	ksu_hide_clear_perm(avd, scon, tcon, tclass, "msd_daemon",
+                        "configfs", "file", "write");
+	ksu_hide_clear_perm(avd, scon, tcon, tclass, "dex2oat",
                         "dex2oat_exec", "file", "execute_no_trans");
     ksu_hide_clear_perm(avd, scon, tcon, tclass, "kernel",
                         "adb_data_file", "file", "read");
@@ -415,7 +454,7 @@ static void ksu_hide_sanitize_status(struct selinux_kernel_status *status)
     status->policyload = KSU_SELINUX_POLICYLOAD_SEQNO;
     status->sequence = 4;
 #else
-    status->policyload = 0;
+    status->policyload = 1;
     status->sequence = 0;
 #endif
 
@@ -545,12 +584,30 @@ static void hook_selinux_status(void)
     }
 }
 
+static int ksu_handle_selinuxfs_write(const char *buf, size_t count)
+{
+    (void)count;
+
+    if (!buf)
+        return 0;
+
+    if (strstr(buf, "oracle") || strstr(buf, "sentinel")) {
+        return -EINVAL;
+    }
+
+    return 0;
+}
+
 static ssize_t my_write_context(struct file *file, char *buf, size_t size)
 {
     if (likely(current_uid().val < 10000)) {
         return orig_context_write(file, buf, size);
     }
 
+	if (ksu_handle_selinuxfs_write(buf, size) != 0) {
+        return -EINVAL;
+    }
+	
     if (ksu_hide_should_mask_context(buf, size)) {
         return -EINVAL;
     }
@@ -600,6 +657,9 @@ static ssize_t my_write_access(struct file *file, char *buf, size_t size)
 {
     if (likely(current_uid().val < 10000)) {
         return orig_access_write(file, buf, size);
+    }
+	if (ksu_handle_selinuxfs_write(buf, size) != 0) {
+        return -EINVAL;
     }
     char *scon = NULL, *tcon = NULL;
     u32 ssid, tsid;
