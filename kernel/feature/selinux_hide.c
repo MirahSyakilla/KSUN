@@ -347,6 +347,69 @@ static void ksu_hide_clear_perm_for_sources(struct av_decision *avd,
     avd->allowed &= ~perm;
 }
 
+static bool ksu_context_type_eq_len(const char *type, size_t type_len,
+                                    const char *name, size_t name_len)
+{
+    return type && type_len == name_len && !memcmp(type, name, type_len);
+}
+
+#define ksu_context_type_eq(type, type_len, literal) \
+    ksu_context_type_eq_len((type), (type_len), (literal), sizeof(literal) - 1)
+
+static void ksu_hide_clear_dirtysepolicy_leaks(struct av_decision *avd,
+                                               const char *scon,
+                                               const char *tcon, u16 tclass)
+{
+    struct policydb *db;
+    const char *stype, *ttype;
+    size_t stype_len, ttype_len;
+    bool is_process;
+    u32 perm = 0;
+
+    if (!avd->allowed) return;
+
+    stype = ksu_context_type(scon, &stype_len);
+    ttype = ksu_context_type(tcon, &ttype_len);
+    if (!stype || !ttype) return;
+
+    db = ksu_hide_policydb();
+    if (!db) return;
+
+    is_process = ksu_hide_class_is(db, tclass, "process");
+
+    if (is_process && ksu_context_type_eq(stype, stype_len, "system_server")) {
+        perm = ksu_hide_perm_mask(db, "process", "execmem");
+    } else if (ksu_context_type_eq(ttype, ttype_len, "droidspacesd")) {
+        if (is_process) {
+            if (ksu_context_type_eq(stype, stype_len, "su") ||
+                ksu_context_type_eq(stype, stype_len, "magisk")) {
+                perm = ksu_hide_perm_mask(db, "process", "dyntransition");
+            }
+        } else if (ksu_hide_class_is(db, tclass, "binder") &&
+                   ksu_context_type_eq(stype, stype_len, "system_server")) {
+            perm = ksu_hide_perm_mask(db, "binder", "call");
+        }
+    } else if (ksu_context_type_eq(ttype, ttype_len, "msd_daemon")) {
+        if (ksu_hide_class_is(db, tclass, "unix_stream_socket") &&
+            (ksu_context_type_eq(stype, stype_len, "msd_app") ||
+             ksu_context_type_eq(stype, stype_len, "msd_daemon"))) {
+            perm = ksu_hide_perm_mask(db, "unix_stream_socket", "connectto");
+        }
+    } else if (ksu_context_type_eq(stype, stype_len, "msd_daemon")) {
+        if (ksu_context_type_eq(ttype, ttype_len, "selinuxfs")) {
+            if (ksu_hide_class_is(db, tclass, "file"))
+                perm = ksu_hide_perm_mask(db, "file", "read");
+        } else if (ksu_context_type_eq(ttype, ttype_len, "configfs")) {
+            if (ksu_hide_class_is(db, tclass, "dir"))
+                perm = ksu_hide_perm_mask(db, "dir", "search");
+            else if (ksu_hide_class_is(db, tclass, "file"))
+                perm = ksu_hide_perm_mask(db, "file", "write");
+        }
+    }
+
+    avd->allowed &= ~perm;
+}
+
 static void ksu_hide_filter_access_decision(struct av_decision *avd,
                                             const char *scon,
                                             const char *tcon, u16 tclass)
@@ -391,6 +454,7 @@ static void ksu_hide_filter_access_decision(struct av_decision *avd,
                                     app_query_sources,
                                     ARRAY_SIZE(app_query_sources),
                                     "lsposed_file", "file", "read");
+    ksu_hide_clear_dirtysepolicy_leaks(avd, scon, tcon, tclass);
     ksu_hide_clear_perm(avd, scon, tcon, tclass, "dex2oat",
                         "dex2oat_exec", "file", "execute_no_trans");
     ksu_hide_clear_perm(avd, scon, tcon, tclass, "kernel",

@@ -349,6 +349,22 @@ bool ksu_deny_effective(struct policydb *db, const char *s, const char *t,
         return false;
 
     perm_mask = 1U << (perm->value - 1);
+    {
+        struct avtab_key key = {
+            .source_type = src->value,
+            .target_type = tgt->value,
+            .target_class = cls->value,
+            .specified = AVTAB_ALLOWED,
+        };
+        struct avtab_node *node = avtab_search_node(&db->te_avtab, &key);
+
+        if (node) {
+            node->datum.u.data &= ~perm_mask;
+            if (is_redundant_avtab_node(node))
+                success &= remove_avtab_node(db, node);
+        }
+    }
+
     ebitmap_for_each_positive_bit(sattr, snode, i) {
         ebitmap_for_each_positive_bit(tattr, tnode, j) {
             struct avtab_key key;
