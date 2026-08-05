@@ -3,6 +3,7 @@
 
 #include <linux/init.h>
 #include <linux/types.h>
+#include <linux/init.h>
 
 bool ksu_sulog_is_enabled(void);
 void __init ksu_sulog_init(void);
