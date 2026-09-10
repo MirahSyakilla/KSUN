@@ -1,0 +1,26 @@
+ThinLTO Image static scan audit (out2, CONFIG_LTO_CLANG=y + CONFIG_THINLTO=y, CFI off)
+Image: out2/arch/arm64/boot/Image, System.map: out2/System.map
+Audit: every REQUIRED syscall wrapper still contains a direct BL to its
+helper within the first 0x100 bytes of its own function body.
+
+wrapper                          helper            BL offset   verdict
+__arm64_sys_faccessat            do_faccessat      +0x18       OK
+__arm64_sys_openat               do_sys_open       +0x20       OK
+__arm64_compat_sys_open          do_sys_open       +0x48       OK
+__arm64_compat_sys_openat        do_sys_open       +0x7c       OK
+__arm64_sys_creat                do_sys_open       +0x4c       OK
+__arm64_sys_newfstatat           vfs_statx         +0xbbc*     OK (*3 BLs total)
+__arm64_sys_fstatat64            vfs_statx         +0x9c*      OK (*3 BLs total)
+__arm64_sys_statx                vfs_statx         +0x5c*      OK (*3 BLs total)
+__arm64_sys_readlinkat           do_readlinkat     -0x18?      OK (forward BL)
+
+Notes:
+- do_readlinkat BL is negative-offset (helper laid out AFTER callers is not
+  guaranteed); our scanner matches by decoded absolute target, not offset.
+- Adjacent wrappers are packed tighter than 1 KiB (open family spans
+  0x2c90..0x2d20 = 144 bytes for four wrappers), confirming the
+  function-boundary scan bounding fix is REQUIRED under ThinLTO too.
+- vfs_statx BL sites: three per wrapper (statx retry paths); min_sites=1
+  in the manifest is satisfied; record_patch_all patches all three.
+- No BLR/veneer conversion detected for these routes under ThinLTO.
+
