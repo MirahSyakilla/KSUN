@@ -6,3 +6,4 @@ unsigned long find_kernel_symbol_exact(const char *symbol_name);
 void ksu_init_symbol_resolver();
 
 #endif
+unsigned long find_kernel_symbol_next_address(unsigned long addr);

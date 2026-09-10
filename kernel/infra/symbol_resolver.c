@@ -55,6 +55,23 @@ struct ksu_lookup_symbol_ctx {
     void *match;
 };
 
+struct next_symbol_ctx {
+    unsigned long addr;
+    unsigned long next;
+};
+
+static int next_symbol_cb(void *data, const char *name, struct module *mod,
+                          unsigned long addr)
+{
+    struct next_symbol_ctx *ctx = data;
+
+    (void)name;
+    (void)mod;
+    if (addr > ctx->addr && (!ctx->next || addr < ctx->next))
+        ctx->next = addr;
+    return 0;
+}
+
 unsigned long __nocfi find_kernel_symbol_exact(const char *symbol_name)
 {
     unsigned long addr = 0;
@@ -187,4 +204,29 @@ void __init ksu_init_symbol_resolver()
         pr_warn("kallsyms_on_each_match_symbol not found!\n");
     }
 #endif
+}
+
+/*
+ * Find the start address of the next kernel symbol strictly after `addr`.
+ * Used to bound branch-site scans at function ends: adjacent syscall
+ * wrappers can be packed within the fixed scan window, and an unbounded
+ * scan from one wrapper would claim the next wrapper's call sites.
+ * Returns 0 when no later symbol exists (or on lookup failure), in which
+ * case callers keep their default window.
+ */
+unsigned long find_kernel_symbol_next_address(unsigned long addr)
+{
+    struct next_symbol_ctx ctx = { .addr = addr, .next = 0 };
+
+    if (!addr)
+        return 0;
+
+#if ALWAYS_HAVE_ON_EACH_SYMBOL
+    kallsyms_on_each_symbol(next_symbol_cb, &ctx);
+#else
+    if (!kallsyms_on_each_symbol_fn)
+        return 0;
+    kallsyms_on_each_symbol_fn(next_symbol_cb, &ctx);
+#endif
+    return ctx.next;
 }
