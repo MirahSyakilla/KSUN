@@ -110,9 +110,11 @@ fi
 # Shell on 64-bit Android is native; compat creat needs a 32-bit binary.
 COMPAT_TESTER="$TD/open_compat_tester"
 if [ -x "$COMPAT_TESTER" ]; then
-	"$COMPAT_TESTER" "$TD/compat_creat_test.txt" && \
-		record "compat creat" PASS || \
-		record "compat creat" FAIL
+	echo "creat_content" > "$TD/compat_creat_target.txt"
+	"$COMPAT_TESTER" "$TD/compat_creat_target.txt" && \
+		record "compat creat/open/stat/readlink/faccessat" PASS || \
+		record "compat creat/open/stat/readlink/faccessat" FAIL
+	rm -f "$TD/compat_creat_target.txt" "$TD/compat_creat_test.txt"
 else
 	record "compat creat (no 32-bit binary)" SKIP
 fi

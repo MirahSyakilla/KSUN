@@ -46,7 +46,9 @@ wait
 record "concurrency stress completed" PASS
 
 # 4. Post-stress: no BUG/OOPS in dmesg
-BUGS=$(dmesg 2>/dev/null | grep -cE 'BUG:|Oops|corrupt|use-after-free')
+# Match only actual kernel BUG/OOPS/panic patterns, NOT filesystem warnings
+# like "Some data may be corrupt" from FAT-fs or application-level messages.
+BUGS=$(dmesg 2>/dev/null | grep -cE '^.\[[ 0-9]+\] (BUG:|Oops|Kernel panic|WARNING: CPU|kernel BUG)')
 [ "$BUGS" -eq 0 ] && \
 	record "no kernel BUG/OOPS after stress" PASS || \
 	record "kernel BUG/OOPS detected: $BUGS" FAIL
