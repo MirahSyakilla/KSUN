@@ -28,6 +28,7 @@
 #include <linux/rcupdate.h>
 #include <linux/rmap.h>
 #include <linux/seq_file.h>
+#include <linux/sched/task_stack.h>
 #include <linux/shmem_fs.h>
 #include <linux/slab.h>
 #include <linux/string.h>
