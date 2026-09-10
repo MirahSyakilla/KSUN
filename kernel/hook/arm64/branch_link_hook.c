@@ -147,6 +147,25 @@ static unsigned long ksu_bl_lookup(const char *name)
 	return addr;
 }
 
+/*
+ * Resolve the canonical address of a helper for INDIRECT calls through our
+ * wrapper function-pointer slots.  Under pre-kCFI clang CFI (canonical jump
+ * tables), only the .cfi_jt address is a registered valid target for typed
+ * indirect calls: a kallsyms real-body address would trip the type check on
+ * every wrapper invocation.  Direct BL patches must keep using
+ * ksu_bl_lookup(), whose real-body address matches the branch immediates in
+ * the caller's text.
+ */
+static unsigned long ksu_bl_lookup_canonical(const char *name)
+{
+	unsigned long addr;
+
+	addr = (unsigned long)ksu_resolve_symbol_for_functable_hook(name);
+
+	pr_info("branch_link: canonical %s=0x%lx\n", name, addr);
+	return addr;
+}
+
 static __always_inline bool ksu_bl_user_path_is_su(const char __user *filename)
 {
 	const u64 *su_words = (const u64 *)ksu_bl_su_path_cmp;
@@ -593,6 +612,7 @@ static int ksu_bl_record_patch_routes(
 		}
 		for (t = 0; t < target_count; t++) {
 			unsigned long target = ksu_bl_lookup(targets[t].name);
+			unsigned long canonical;
 			int sites;
 
 			if (!target)
@@ -600,8 +620,13 @@ static int ksu_bl_record_patch_routes(
 			/* Bind the original helper slot before the first text
 			 * patch: stop_machine() releases other CPUs before the
 			 * patch returns, so publishing afterwards would leave a
-			 * NULL-call window for in-flight callers. */
-			WRITE_ONCE(*targets[t].fn_slot, target);
+			 * NULL-call window for in-flight callers.  The slot is
+			 * invoked indirectly, so bind the canonical address
+			 * (.cfi_jt under pre-kCFI CFI); `target` stays the
+			 * real-body address that matches the BL immediates. */
+			canonical = ksu_bl_lookup_canonical(targets[t].name);
+			WRITE_ONCE(*targets[t].fn_slot,
+				   canonical ? canonical : target);
 #if KSU_BL_CONSERVATIVE_RUNTIME_PATCHES
 			last_ret = ksu_bl_record_patch(name, caller_addr, target,
 						       targets[t].hook);
@@ -748,7 +773,7 @@ static bool ksu_branch_link_patch_faccessat_family(void)
 	bool ready;
 	int count;
 
-	do_faccessat_fn = (void *)target;
+	do_faccessat_fn = (void *)ksu_bl_lookup_canonical("do_faccessat");
 	count = ksu_bl_record_patch_manifest(
 		"faccessat/do_faccessat", callers, ARRAY_SIZE(callers), target,
 		(unsigned long)ksu_do_faccessat, &found, &patched);
@@ -803,7 +828,8 @@ static bool ksu_branch_link_patch_readlink_family(void)
 	unsigned int patched = 0;
 	int count;
 
-	WRITE_ONCE(do_readlinkat_fn, (void *)target);
+	WRITE_ONCE(do_readlinkat_fn,
+			   (void *)ksu_bl_lookup_canonical("do_readlinkat"));
 	count = ksu_bl_record_patch_manifest(
 		"readlink/do_readlinkat", callers, ARRAY_SIZE(callers), target,
 		(unsigned long)ksu_do_readlinkat, &found, &patched);
@@ -1279,7 +1305,7 @@ static bool ksu_branch_link_patch_statfs_family(void)
 	int user_sites;
 	int fd_sites;
 
-	vfs_statfs_fn = (void *)target;
+	vfs_statfs_fn = (void *)ksu_bl_lookup_canonical("vfs_statfs");
 	user_sites = ksu_bl_record_patch_manifest(
 		"statfs-path/user_statfs", user_statfs_callers,
 		ARRAY_SIZE(user_statfs_callers), user_statfs_target,
@@ -1740,7 +1766,7 @@ static bool ksu_branch_link_patch_susfs(void)
 
 	caller_addr = ksu_bl_lookup("vfs_getattr");
 	target_addr = ksu_bl_lookup("vfs_getattr_nosec");
-	vfs_getattr_nosec_fn = (void *)target_addr;
+	vfs_getattr_nosec_fn = (void *)ksu_bl_lookup_canonical("vfs_getattr_nosec");
 	ret = ksu_bl_record_patch_all("susfs/vfs_getattr_nosec", caller_addr,
 				      target_addr,
 				      (unsigned long)ksu_vfs_getattr_nosec);
@@ -1748,7 +1774,7 @@ static bool ksu_branch_link_patch_susfs(void)
 	direct_getattr_ready = ret > 0;
 
 	create_target = ksu_bl_lookup("vfs_create_mount");
-	vfs_create_mount_fn = (void *)create_target;
+	vfs_create_mount_fn = (void *)ksu_bl_lookup_canonical("vfs_create_mount");
 	{
 		int mount_first_record = ksu_bl_record_count;
 		unsigned int create_found = 0;
@@ -1767,7 +1793,7 @@ static bool ksu_branch_link_patch_susfs(void)
 		create_count);
 
 	clone_target = ksu_bl_lookup("clone_mnt");
-	clone_mnt_fn = (void *)clone_target;
+	clone_mnt_fn = (void *)ksu_bl_lookup_canonical("clone_mnt");
 		clone_count = ksu_bl_record_patch_manifest(
 		"susfs/clone_mnt", clone_mnt_callers,
 		ARRAY_SIZE(clone_mnt_callers), clone_target,
@@ -1775,7 +1801,7 @@ static bool ksu_branch_link_patch_susfs(void)
 	pr_info("branch_link: susfs/clone_mnt patched: %d\n", clone_count);
 
 	cleanup_target = ksu_bl_lookup("cleanup_mnt");
-	cleanup_mnt_fn = (void *)cleanup_target;
+	cleanup_mnt_fn = (void *)ksu_bl_lookup_canonical("cleanup_mnt");
 		cleanup_count = ksu_bl_record_patch_manifest(
 		"susfs/cleanup_mnt", cleanup_mnt_callers,
 		ARRAY_SIZE(cleanup_mnt_callers), cleanup_target,
@@ -1896,7 +1922,7 @@ int ksu_branch_link_patch_init(void)
 			"do_execveat_common",
 		};
 
-		do_execveat_common_fn = (void *)ksu_bl_lookup("do_execveat_common");
+		do_execveat_common_fn = (void *)ksu_bl_lookup_canonical("do_execveat_common");
 		ret = ksu_bl_patch_exec_route(
 			"execve/do_execveat_common", exec_callers,
 			ARRAY_SIZE(exec_callers), exec_targets,
@@ -1934,12 +1960,12 @@ int ksu_branch_link_patch_init(void)
 	 * skips unresolved targets), so a patched site always has a valid
 	 * pointer here. Assigning from the route result instead would NULL the
 	 * shared __do_execve_file_fn after a later caller's miss. */
-	__do_execve_file_fn = (void *)ksu_bl_lookup("__do_execve_file");
-	do_execve_fn = (void *)ksu_bl_lookup("do_execve");
-	do_execveat_fn = (void *)ksu_bl_lookup("do_execveat");
+	__do_execve_file_fn = (void *)ksu_bl_lookup_canonical("__do_execve_file");
+	do_execve_fn = (void *)ksu_bl_lookup_canonical("do_execve");
+	do_execveat_fn = (void *)ksu_bl_lookup_canonical("do_execveat");
 #ifdef CONFIG_COMPAT
-	compat_do_execve_fn = (void *)ksu_bl_lookup("compat_do_execve");
-	compat_do_execveat_fn = (void *)ksu_bl_lookup("compat_do_execveat");
+	compat_do_execve_fn = (void *)ksu_bl_lookup_canonical("compat_do_execve");
+	compat_do_execveat_fn = (void *)ksu_bl_lookup_canonical("compat_do_execveat");
 #endif
 
 	ret = ksu_bl_patch_exec_route(
