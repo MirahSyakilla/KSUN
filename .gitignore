@@ -4,3 +4,6 @@ CLAUDE.md
 AGENTS.md
 .DS_Store
 validation/tests/bin/
+validation/appuid-tester/build/
+validation/appuid-tester/libs/
+validation/appuid-tester/debug.keystore
