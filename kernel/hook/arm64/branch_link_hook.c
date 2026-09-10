@@ -713,7 +713,18 @@ static long __nocfi ksu_do_faccessat(int dfd, const char __user *filename,
 #ifdef CONFIG_KSU_KPROBES_NOMOUNT
 	ksu_nomount_lookup_scope_enter(&lookup_scope, dfd);
 #endif
-	ret = do_faccessat_fn(dfd, filename, mode, flags);
+	{
+		long (*fn)(int, const char __user *, int, int) =
+			READ_ONCE(do_faccessat_fn);
+
+		if (unlikely(!fn)) {
+#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+			ksu_nomount_lookup_scope_exit(&lookup_scope);
+#endif
+			return -EOPNOTSUPP;
+		}
+		ret = fn(dfd, filename, mode, flags);
+	}
 #ifdef CONFIG_KSU_KPROBES_NOMOUNT
 	ksu_nomount_lookup_scope_exit(&lookup_scope);
 #endif
@@ -738,7 +749,18 @@ static long __nocfi ksu_do_faccessat(int dfd, const char __user *filename,
 #ifdef CONFIG_KSU_KPROBES_NOMOUNT
 	ksu_nomount_lookup_scope_enter(&lookup_scope, dfd);
 #endif
-	ret = do_faccessat_fn(dfd, filename, mode);
+	{
+		long (*fn)(int, const char __user *, int) =
+			READ_ONCE(do_faccessat_fn);
+
+		if (unlikely(!fn)) {
+#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+			ksu_nomount_lookup_scope_exit(&lookup_scope);
+#endif
+			return -EOPNOTSUPP;
+		}
+		ret = fn(dfd, filename, mode);
+	}
 #ifdef CONFIG_KSU_KPROBES_NOMOUNT
 	ksu_nomount_lookup_scope_exit(&lookup_scope);
 #endif
