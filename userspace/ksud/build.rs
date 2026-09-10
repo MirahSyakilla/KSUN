@@ -4,8 +4,45 @@ use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
-fn get_git_version() -> Result<(u32, String), std::io::Error> {
+fn parse_version_file(path: &Path) -> Option<(u32, String)> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    let lines: Vec<_> = contents.lines().map(str::trim).collect();
+    if !lines.iter().any(|line| line.contains('=')) && lines.len() >= 2 {
+        return Some((lines[0].parse().ok()?, lines[1].to_string()));
+    }
+    let mut code = None;
+    let mut tag = None;
+    for line in contents.lines() {
+        if let Some(value) = line.strip_prefix("KSU_VERSION_CODE=") {
+            code = value.trim().parse().ok();
+        } else if let Some(value) = line.strip_prefix("KSU_VERSION_TAG=") {
+            if !value.trim().is_empty() {
+                tag = Some(value.trim().to_string());
+            }
+        }
+    }
+    Some((code?, tag?))
+}
+
+fn get_git_version(manifest_dir: &Path) -> Result<(u32, String), std::io::Error> {
+    let git_root = String::from_utf8(
+        Command::new("git")
+            .current_dir(manifest_dir)
+            .args(["rev-parse", "--show-toplevel"])
+            .output()?
+            .stdout,
+    )
+    .map_err(|_| std::io::Error::other("Failed to read git root"))?;
+    let project_root = manifest_dir
+        .join("../..")
+        .canonicalize()
+        .map_err(|_| std::io::Error::other("Failed to resolve project root"))?;
+    if Path::new(git_root.trim()) != project_root {
+        return Err(std::io::Error::other("Git root is not the KernelSU project root"));
+    }
+
     let output = Command::new("git")
+        .current_dir(manifest_dir)
         .args(["rev-list", "--count", "HEAD"])
         .output()?;
 
@@ -19,13 +56,41 @@ fn get_git_version() -> Result<(u32, String), std::io::Error> {
 
     let version_name = String::from_utf8(
         Command::new("git")
+            .current_dir(manifest_dir)
             .args(["describe", "--tags", "--always"])
             .output()?
             .stdout,
     )
     .map_err(|_| std::io::Error::other("Failed to read git describe stdout"))?;
-    let version_name = version_name.trim_start_matches('v').to_string();
+    let version_name = version_name.trim().trim_start_matches('v').to_string();
     Ok((version_code, version_name))
+}
+
+fn get_version() -> (u32, String) {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if let (Ok(code), Ok(tag)) = (
+        env::var("KSU_VERSION_OVERRIDE"),
+        env::var("KSU_VERSION_TAG_OVERRIDE"),
+    ) {
+        if let Ok(code) = code.parse() {
+            return (code, tag);
+        }
+    }
+    if let Ok(version) = get_git_version(manifest_dir) {
+        return version;
+    }
+    if let Some((code, tag)) = parse_version_file(&manifest_dir.join("../../kernel/VERSION")) {
+        return (code, tag.trim_start_matches('v').to_string());
+    }
+    if let Some((count, tag)) =
+        parse_version_file(&manifest_dir.join("../../kernel/.ksu_git_version"))
+    {
+        return (30000 + count, tag.trim_start_matches('v').to_string());
+    }
+    println!(
+        "cargo:warning=KernelSU-Next version metadata unavailable, using unknown build marker"
+    );
+    (1, "v0.0.0".to_string())
 }
 
 fn configure_bindgen() {
@@ -55,14 +120,11 @@ fn configure_bindgen() {
 }
 
 fn main() {
-    let (code, name) = match get_git_version() {
-        Ok((code, name)) => (code, name),
-        Err(_) => {
-            // show warning if git is not installed
-            println!("cargo:warning=Failed to get git version, using 0.0.0");
-            (0, "0.0.0".to_string())
-        }
-    };
+    println!("cargo:rerun-if-env-changed=KSU_VERSION_OVERRIDE");
+    println!("cargo:rerun-if-env-changed=KSU_VERSION_TAG_OVERRIDE");
+    println!("cargo:rerun-if-changed=../../kernel/VERSION");
+    println!("cargo:rerun-if-changed=../../kernel/.ksu_git_version");
+    let (code, name) = get_version();
     let out_dir = env::var("OUT_DIR").expect("Failed to get $OUT_DIR");
     let out_dir = Path::new(&out_dir);
     File::create(Path::new(out_dir).join("VERSION_CODE"))
