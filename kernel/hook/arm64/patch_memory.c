@@ -223,6 +223,20 @@ err:
     return ret;
 }
 
+/*
+ * Execution quiescence is provided by stop_machine() (see
+ * ksu_patch_text()/ksu_patch_text_compare() below): it takes the
+ * cpu-hotplug read lock, so no CPU can enter or leave the online set
+ * for the duration, and parks every non-master CPU in its per-CPU
+ * stopper kthread ("migration/N"), which runs in the stop scheduling
+ * class and preempts everything else with IRQs disabled.  While the
+ * non-master CPUs spin on @cpu_count, the master performs the fixmap
+ * write plus the DC clean / IC invalidate of the patched range; each
+ * released CPU then executes isb() below, a context synchronization
+ * event that discards already-fetched and pre-decoded instructions.
+ * No CPU can therefore execute the patched address across the write,
+ * and the aligned 32-bit patch cannot be observed half-applied.
+ */
 static int ksu_patch_text_cb(void *arg)
 {
     struct patch_text_info *pp = arg;

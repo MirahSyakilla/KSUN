@@ -714,6 +714,17 @@ static long __nocfi ksu_do_faccessat(int dfd, const char __user *filename,
 	ksu_nomount_lookup_scope_enter(&lookup_scope, dfd);
 #endif
 	{
+		/*
+		 * READ_ONCE() + NULL-check: a failed family patch rolls the
+		 * slot back to NULL after stop_machine() has released the
+		 * other CPUs, so a task preempted inside this wrapper before
+		 * the rollback resumes and loads the slot afterwards.  The
+		 * load is a naturally aligned pointer (single-copy atomic
+		 * on arm64); READ_ONCE() keeps the compiler from tearing or
+		 * caching it, and the NULL check degrades the race window
+		 * to the -EOPNOTSUPP fallback instead of a call through
+		 * NULL.
+		 */
 		long (*fn)(int, const char __user *, int, int) =
 			READ_ONCE(do_faccessat_fn);
 
@@ -2173,6 +2184,15 @@ install_failed:
 	return ret ? ret : -EIO;
 }
 
+/*
+ * Module unload is irrelevant here: this kernel is built with
+ * CONFIG_KSU=y, so the code is linked into vmlinux and the module exit
+ * path never runs; ksu_branch_link_patch_exit() is only reachable from
+ * the __exit ksu_syscall_hook_manager_exit(), which the linker discards
+ * for built-in code.  ksu_bl_restore_records() therefore only ever runs
+ * under ksu_bl_lock during install rollback or that exit call, never in
+ * response to an unload racing live wrappers or fn slots.
+ */
 int ksu_branch_link_patch_exit(void)
 {
 	int ret;

@@ -29,6 +29,17 @@
 
 unsigned long phys_from_virt(unsigned long addr, int *err);
 int ksu_patch_text(void *dst, void *src, size_t len, int flags);
+/*
+ * Formal safety guarantee: ksu_patch_text_compare() runs under
+ * stop_machine(), so every non-master CPU is parked in its stopper
+ * kthread and cannot execute while the expected word is read and the
+ * aligned 32-bit replacement is written; the write is therefore atomic
+ * with respect to instruction execution.  On return the patched range
+ * has been DC-cleaned and IC-invalidated and each released CPU has
+ * executed isb(), so every PE fetches the new instruction.  Success
+ * means the old text was verified and replaced; -EBADE means the
+ * expected word did not match and the target was left untouched.
+ */
 int ksu_patch_text_compare(void *dst, const void *expected, void *src,
                            size_t len, int flags);
 
