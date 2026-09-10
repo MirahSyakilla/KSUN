@@ -144,14 +144,14 @@ void __init ksu_syscall_hook_manager_init(void)
 
     // Register syscall hooks via dispatcher
     ksu_register_syscall_hook(__NR_setresuid, ksu_hook_setresuid);
-#ifndef CONFIG_KSU_HACK_ARM64_BRANCH_LINK
+#ifdef __NR_execve
     ksu_register_syscall_hook(__NR_execve, ksu_hook_execve);
+#endif
 #ifdef __NR_newfstatat
     ksu_register_syscall_hook(__NR_newfstatat, ksu_hook_newfstatat);
 #endif
 #ifdef __NR_faccessat
     ksu_register_syscall_hook(__NR_faccessat, ksu_hook_faccessat);
-#endif
 #endif
 #ifdef CONFIG_KSU_TAMPER_SYSCALL_TABLE
 #ifdef __NR_reboot
@@ -173,7 +173,13 @@ void __init ksu_syscall_hook_manager_init(void)
 #endif
 
 #ifdef CONFIG_KSU_HACK_ARM64_BRANCH_LINK
-    ksu_branch_link_patch_init();
+    {
+        int branch_ret = ksu_branch_link_patch_init();
+
+        if (branch_ret)
+            pr_warn("hook_manager: branch-link init incomplete: %d\n",
+                    branch_ret);
+    }
 #endif
 
     ksu_setuid_hook_init();
@@ -185,7 +191,13 @@ void __exit ksu_syscall_hook_manager_exit(void)
 {
     pr_info("hook_manager: ksu_hook_manager_exit called\n");
 #ifdef CONFIG_KSU_HACK_ARM64_BRANCH_LINK
-    ksu_branch_link_patch_exit();
+    {
+        int branch_ret = ksu_branch_link_patch_exit();
+        if (branch_ret) {
+            pr_err("hook_manager: branch-link restore failed: %d\n",
+                   branch_ret);
+        }
+    }
 #endif
 #if defined(CONFIG_HAVE_SYSCALL_TRACEPOINTS) && \
 	!defined(CONFIG_KSU_TAMPER_SYSCALL_TABLE)
@@ -205,14 +217,14 @@ void __exit ksu_syscall_hook_manager_exit(void)
 #endif
 #endif
     ksu_unregister_syscall_hook(__NR_setresuid);
-#ifndef CONFIG_KSU_HACK_ARM64_BRANCH_LINK
+#ifdef __NR_execve
     ksu_unregister_syscall_hook(__NR_execve);
+#endif
 #ifdef __NR_newfstatat
     ksu_unregister_syscall_hook(__NR_newfstatat);
 #endif
 #ifdef __NR_faccessat
     ksu_unregister_syscall_hook(__NR_faccessat);
-#endif
 #endif
 
     ksu_syscall_hook_exit();

@@ -19,6 +19,9 @@
 #include "hook/syscall_hook.h"
 #include "hook/syscall_event_bridge.h"
 #include "feature/adb_root.h"
+#ifdef CONFIG_KSU_HACK_ARM64_BRANCH_LINK
+#include "hook/arm64/branch_link_hook.h"
+#endif
 
 static int ksu_handle_init_mark_tracker(const char __user **filename_user)
 {
@@ -40,7 +43,9 @@ static int ksu_handle_init_mark_tracker(const char __user **filename_user)
     if (unlikely(strcmp(path, KSUD_PATH) == 0)) {
         pr_info("hook_manager: escape to root for init executing ksud: %d\n", current->pid);
         escape_to_root_for_init();
-    } else if (likely(strstr(path, "/app_process") == NULL && strstr(path, "/adbd") == NULL)) {
+    } else if (likely(strstr(path, "/app_process") == NULL &&
+                    strstr(path, "/stub_zygote") == NULL &&
+                    strstr(path, "/adbd") == NULL)) {
 #ifndef CONFIG_KSU_TAMPER_SYSCALL_TABLE
         pr_info("hook_manager: unmark %d exec %s\n", current->pid, path);
         ksu_clear_task_tracepoint_flag_if_needed(current);
@@ -52,6 +57,13 @@ static int ksu_handle_init_mark_tracker(const char __user **filename_user)
 
 long __nocfi ksu_hook_newfstatat(int orig_nr, const struct pt_regs *regs)
 {
+#ifdef CONFIG_KSU_HACK_ARM64_BRANCH_LINK
+    /* Keep the dispatcher hook installed as the su-redirect fallback during
+     * branch-link installation and after a failed family transaction; the
+     * branch sites cover newfstatat itself once the family is READY. */
+    if (ksu_branch_link_stat_path_ready())
+        return ksu_invoke_syscall_nr(orig_nr, regs);
+#endif
     if (!ksu_su_compat_enabled)
         return ksu_invoke_syscall_nr(orig_nr, regs);
 
@@ -60,6 +72,12 @@ long __nocfi ksu_hook_newfstatat(int orig_nr, const struct pt_regs *regs)
 
 long __nocfi ksu_hook_faccessat(int orig_nr, const struct pt_regs *regs)
 {
+#ifdef CONFIG_KSU_HACK_ARM64_BRANCH_LINK
+    /* Keep the dispatcher hook installed as the fallback during branch-link
+     * installation and after a failed family transaction. */
+    if (ksu_branch_link_faccessat_ready())
+        return ksu_invoke_syscall_nr(orig_nr, regs);
+#endif
     if (!ksu_su_compat_enabled)
         return ksu_invoke_syscall_nr(orig_nr, regs);
 
@@ -80,6 +98,11 @@ void ksu_stop_ksud_execve_hook()
 
 long __nocfi ksu_hook_execve(int orig_nr, const struct pt_regs *regs)
 {
+#ifdef CONFIG_KSU_HACK_ARM64_BRANCH_LINK
+    /* Branch-link owns this syscall only after its complete manifest commits. */
+    if (ksu_branch_link_exec_ready())
+        return ksu_invoke_syscall_nr(orig_nr, regs);
+#endif
     const char __user **filename_user = (const char __user **)&PT_REGS_PARM1(regs);
     const char __user *const __user *argv_user = (const char __user *const __user *)PT_REGS_PARM2(regs);
     bool current_is_init = is_init(current_cred());
