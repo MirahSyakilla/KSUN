@@ -1406,9 +1406,9 @@ static int ksu_nomount_collect_ancestors(const struct path *backend,
 		if (err)
 			goto out_path;
 		inode = d_backing_inode(resolved.dentry);
-		if (!inode || !S_ISDIR(inode->i_mode)) {
+		if (!inode || !inode->i_sb || !S_ISDIR(inode->i_mode)) {
 			path_put(&resolved);
-			err = -ENOTDIR;
+			err = inode && !inode->i_sb ? -ENODEV : -ENOTDIR;
 			goto out_path;
 		}
 		keys[index].ino = inode->i_ino;

@@ -10,6 +10,7 @@
 #include "linux/gfp.h" // IWYU pragma: keep
 #include "linux/uaccess.h"
 #include "linux/stop_machine.h"
+#include "linux/string.h"
 #include "asm/cacheflush.h"
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 8, 0)
@@ -140,6 +141,7 @@ fail:
 struct patch_text_info {
     void *dst;
     void *src;
+    const void *expected;
     size_t len;
     atomic_t cpu_count;
     int flags;
@@ -228,7 +230,26 @@ static int ksu_patch_text_cb(void *arg)
 
     /* The last CPU becomes master */
     if (atomic_inc_return(&pp->cpu_count) == num_online_cpus()) {
+        if (pp->expected) {
+            u8 current_word[sizeof(u32)];
+
+            if (pp->len > sizeof(current_word) ||
+                copy_from_kernel_nofault(current_word, pp->dst, pp->len) ||
+                memcmp(current_word, pp->expected, pp->len)) {
+                ret = -EBADE;
+                goto notify;
+            }
+        }
         ret = ksu_patch_text_nosync(pp);
+        if (!ret && pp->expected) {
+            u8 current_word[sizeof(u32)];
+
+            if (pp->len > sizeof(current_word) ||
+                copy_from_kernel_nofault(current_word, pp->dst, pp->len) ||
+                memcmp(current_word, pp->src, pp->len))
+                ret = -EIO;
+        }
+notify:
         /* Notify other processors with an additional increment. */
         atomic_inc(&pp->cpu_count);
     } else {
@@ -245,6 +266,22 @@ int ksu_patch_text(void *dst, void *src, size_t len, int flags)
     struct patch_text_info info = {
         .dst = dst,
         .src = src,
+        .expected = NULL,
+        .len = len,
+        .cpu_count = ATOMIC_INIT(0),
+        .flags = flags,
+    };
+
+    return stop_machine(ksu_patch_text_cb, &info, cpu_online_mask);
+}
+
+int ksu_patch_text_compare(void *dst, const void *expected, void *src,
+                           size_t len, int flags)
+{
+    struct patch_text_info info = {
+        .dst = dst,
+        .src = src,
+        .expected = expected,
         .len = len,
         .cpu_count = ATOMIC_INIT(0),
         .flags = flags,

@@ -69,9 +69,10 @@ static void stop_execve_hook();
 
 #ifdef CONFIG_KSU_KPROBES_HOOK
 static struct work_struct stop_input_hook_work;
+static bool ksu_input_hook __read_mostly = true;
+static bool ksu_input_handler_registered;
 #else
 bool ksu_init_rc_hook __read_mostly = true;
-bool ksu_input_hook __read_mostly = true;
 bool ksud_execve_key __read_mostly = true;
 #endif
 
@@ -489,11 +490,9 @@ static bool is_volumedown_enough(unsigned int count)
 
 int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value)
 {
-#ifndef CONFIG_KSU_KPROBES_HOOK
 	if (!ksu_input_hook) {
 		return 0;
 	}
-#endif
     if (*type == EV_KEY && *code == KEY_VOLUMEDOWN) {
         int val = *value;
         pr_info("KEY_VOLUMEDOWN val: %d\n", val);
@@ -615,22 +614,73 @@ static long ksu_sys_fstat(KSU_SYSCALL_WRAPPER_ARGS)
     return ret;
 }
 
-static int input_handle_event_handler_pre(struct kprobe *p, struct pt_regs *regs)
+static void kprobe_vol_detector_event(struct input_handle *handle,
+                                      unsigned int type, unsigned int code,
+                                      int value)
 {
-    unsigned int *type = (unsigned int *)&PT_REGS_PARM2(regs);
-    unsigned int *code = (unsigned int *)&PT_REGS_PARM3(regs);
-    int *value = (int *)&PT_REGS_CCALL_PARM4(regs);
-    return ksu_handle_input_handle_event(type, code, value);
+	ksu_handle_input_handle_event(&type, &code, &value);
 }
 
-static struct kprobe input_event_kp = {
-    .symbol_name = "input_event",
-    .pre_handler = input_handle_event_handler_pre,
+static int kprobe_vol_detector_connect(struct input_handler *handler,
+                                       struct input_dev *dev,
+                                       const struct input_device_id *id)
+{
+	struct input_handle *handle;
+	int error;
+
+	handle = kzalloc(sizeof(*handle), GFP_KERNEL);
+	if (!handle)
+		return -ENOMEM;
+
+	handle->dev = dev;
+	handle->handler = handler;
+	handle->name = "ksu_handle_input";
+	error = input_register_handle(handle);
+	if (error)
+		goto err_free_handle;
+	error = input_open_device(handle);
+	if (error)
+		goto err_unregister_handle;
+	return 0;
+
+err_unregister_handle:
+	input_unregister_handle(handle);
+err_free_handle:
+	kfree(handle);
+	return error;
+}
+
+static void kprobe_vol_detector_disconnect(struct input_handle *handle)
+{
+	input_close_device(handle);
+	input_unregister_handle(handle);
+	kfree(handle);
+}
+
+static const struct input_device_id kprobe_vol_detector_ids[] = {
+	{
+		.flags = INPUT_DEVICE_ID_MATCH_EVBIT | INPUT_DEVICE_ID_MATCH_KEYBIT,
+		.evbit = { BIT_MASK(EV_KEY) },
+		.keybit = { [BIT_WORD(KEY_VOLUMEDOWN)] = BIT_MASK(KEY_VOLUMEDOWN) },
+	},
+	{}
+};
+
+static struct input_handler kprobe_vol_detector_handler = {
+	.event = kprobe_vol_detector_event,
+	.connect = kprobe_vol_detector_connect,
+	.disconnect = kprobe_vol_detector_disconnect,
+	.name = "ksu",
+	.id_table = kprobe_vol_detector_ids,
 };
 
 static void do_stop_input_hook(struct work_struct *work)
 {
-    unregister_kprobe(&input_event_kp);
+	if (ksu_input_handler_registered) {
+		ksu_input_hook = false;
+		input_unregister_handler(&kprobe_vol_detector_handler);
+		ksu_input_handler_registered = false;
+	}
 }
 
 static void stop_init_rc_hook()
@@ -642,8 +692,8 @@ static void stop_init_rc_hook()
 
 static void stop_input_hook(void)
 {
-    bool ret = schedule_work(&stop_input_hook_work);
-    pr_info("unregister input kprobe: %d!\n", ret);
+	bool ret = schedule_work(&stop_input_hook_work);
+	pr_info("unregister input handler: %d!\n", ret);
 }
 #else // manual hook, no kprobes
 
@@ -855,10 +905,10 @@ void __init ksu_ksud_init()
     ksu_syscall_table_hook(__NR_read, ksu_sys_read, &orig_sys_read);
     ksu_syscall_table_hook(__NR_fstat, ksu_sys_fstat, &orig_sys_fstat);
 
-    ret = register_kprobe(&input_event_kp);
-    pr_info("ksud: input_event_kp: %d\n", ret);
-
     INIT_WORK(&stop_input_hook_work, do_stop_input_hook);
+    ret = input_register_handler(&kprobe_vol_detector_handler);
+    ksu_input_handler_registered = ret == 0;
+    pr_info("ksud: input handler: %d\n", ret);
 #endif
 #ifdef CONFIG_KSU_MANUAL_HOOK
     vol_detector_init();
@@ -868,10 +918,12 @@ void __init ksu_ksud_init()
 void __exit ksu_ksud_exit()
 {
 #ifdef CONFIG_KSU_KPROBES_HOOK
-	// TODO:
-	// this should be done before unregister vfs_read_kp
-	// stop_init_rc_hook();
-	unregister_kprobe(&input_event_kp);
+	cancel_work_sync(&stop_input_hook_work);
+	if (ksu_input_handler_registered) {
+		ksu_input_hook = false;
+		input_unregister_handler(&kprobe_vol_detector_handler);
+		ksu_input_handler_registered = false;
+	}
 #endif
 #ifdef CONFIG_KSU_MANUAL_HOOK
 	vol_detector_exit();

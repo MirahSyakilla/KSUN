@@ -77,19 +77,25 @@ static int ksu_sha256(const unsigned char *data, unsigned int datalen,
 static bool check_block(struct file *fp, u32 *size4, loff_t *pos, u32 *offset,
                         unsigned expected_size, const char *expected_sha256)
 {
-	ksu_kernel_read_compat(fp, size4, 0x4, pos); // signer-sequence length
-	ksu_kernel_read_compat(fp, size4, 0x4, pos); // signer length
-	ksu_kernel_read_compat(fp, size4, 0x4, pos); // signed data length
+	if (ksu_kernel_read_compat(fp, size4, 0x4, pos) != 0x4) // signer-sequence length
+		return false;
+	if (ksu_kernel_read_compat(fp, size4, 0x4, pos) != 0x4) // signer length
+		return false;
+	if (ksu_kernel_read_compat(fp, size4, 0x4, pos) != 0x4) // signed data length
+		return false;
 
 	*offset += 0x4 * 3;
 
-	ksu_kernel_read_compat(fp, size4, 0x4, pos); // digests-sequence length
+	if (ksu_kernel_read_compat(fp, size4, 0x4, pos) != 0x4) // digests-sequence length
+		return false;
 
 	*pos += *size4;
 	*offset += 0x4 + *size4;
 
-	ksu_kernel_read_compat(fp, size4, 0x4, pos); // certificates length
-	ksu_kernel_read_compat(fp, size4, 0x4, pos); // certificate length
+	if (ksu_kernel_read_compat(fp, size4, 0x4, pos) != 0x4) // certificates length
+		return false;
+	if (ksu_kernel_read_compat(fp, size4, 0x4, pos) != 0x4) // certificate length
+		return false;
 	*offset += 0x4 * 2;
 
 	if (*size4 == expected_size) {
@@ -101,7 +107,8 @@ static bool check_block(struct file *fp, u32 *size4, loff_t *pos, u32 *offset,
 			pr_info("cert length overlimit\n");
 			return false;
 		}
-		ksu_kernel_read_compat(fp, cert, *size4, pos);
+		if (ksu_kernel_read_compat(fp, cert, *size4, pos) != *size4)
+			return false;
 		unsigned char digest[SHA256_DIGEST_SIZE];
 		if (IS_ERR(ksu_sha256(cert, *size4, digest))) {
 			pr_info("sha256 error\n");
@@ -151,7 +158,9 @@ static bool has_v1_signature_file(struct file *fp)
         // Read the entry file name
         if (header.file_name_length == sizeof(MANIFEST) - 1) {
             char fileName[sizeof(MANIFEST)];
-            ksu_kernel_read_compat(fp, fileName, header.file_name_length, &pos);
+			if (ksu_kernel_read_compat(fp, fileName, header.file_name_length,
+						       &pos) != header.file_name_length)
+				return false;
             fileName[header.file_name_length] = '\0';
 
             // Check if the entry matches META-INF/MANIFEST.MF
@@ -199,10 +208,12 @@ static __always_inline bool check_v2_signature(char *path,
 	for (i = 0;; ++i) {
 		unsigned short n;
 		pos = generic_file_llseek(fp, -i - 2, SEEK_END);
-		ksu_kernel_read_compat(fp, &n, 2, &pos);
+		if (pos < 0 || ksu_kernel_read_compat(fp, &n, 2, &pos) != 2)
+			continue;
 		if (n == i) {
 			pos -= 22;
-			ksu_kernel_read_compat(fp, &size4, 4, &pos);
+			if (ksu_kernel_read_compat(fp, &size4, 4, &pos) != 4)
+				goto clean;
 			if ((size4 ^ 0xcafebabeu) == 0xccfbf1eeu) {
 				break;
 			}
@@ -215,17 +226,24 @@ static __always_inline bool check_v2_signature(char *path,
 
 	pos += 12;
 	// offset
-	ksu_kernel_read_compat(fp, &size4, 0x4, &pos);
+	if (ksu_kernel_read_compat(fp, &size4, 0x4, &pos) != 0x4)
+		goto clean;
+	if (size4 < 0x18)
+		goto clean;
 	pos = size4 - 0x18;
 
-	ksu_kernel_read_compat(fp, &size8, 0x8, &pos);
-	ksu_kernel_read_compat(fp, buffer, 0x10, &pos);
+	if (ksu_kernel_read_compat(fp, &size8, 0x8, &pos) != 0x8 ||
+	    ksu_kernel_read_compat(fp, buffer, 0x10, &pos) != 0x10)
+		goto clean;
 	if (strcmp((char *)buffer, "APK Sig Block 42")) {
 		goto clean;
 	}
+	if (size8 > (u64)size4 - 0x8)
+		goto clean;
 
 	pos = size4 - (size8 + 0x8);
-	ksu_kernel_read_compat(fp, &size_of_block, 0x8, &pos);
+	if (ksu_kernel_read_compat(fp, &size_of_block, 0x8, &pos) != 0x8)
+		goto clean;
 	if (size_of_block != size8) {
 		goto clean;
 	}
@@ -234,12 +252,16 @@ static __always_inline bool check_v2_signature(char *path,
     while (loop_count++ < 10) {
         uint32_t id;
         uint32_t offset;
-        ksu_kernel_read_compat(fp, &size8, 0x8,
-                    &pos); // sequence length
-        if (size8 == size_of_block) {
-            break;
-        }
-        ksu_kernel_read_compat(fp, &id, 0x4, &pos); // id
+		if (ksu_kernel_read_compat(fp, &size8, 0x8,
+					   &pos) != 0x8) // sequence length
+			goto clean;
+		if (size8 == size_of_block) {
+			break;
+		}
+		if (size8 < 0x8 || size8 > size_of_block)
+			goto clean;
+		if (ksu_kernel_read_compat(fp, &id, 0x4, &pos) != 0x4) // id
+			goto clean;
         offset = 4;
         if (id == 0x7109871au) {
             v2_signing_blocks++;

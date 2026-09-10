@@ -1,6 +1,7 @@
 #include <linux/security.h>
 #include <linux/atomic.h>
 #include <linux/kernel.h>
+#include <linux/ratelimit.h>
 #include <linux/mutex.h>
 #include <linux/version.h>
 

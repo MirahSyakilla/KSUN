@@ -26,6 +26,9 @@ void ksu_susfs_handle_cleanup_mnt(struct mount *mnt);
 struct ns_common *ksu_susfs_handle_mntns_get(struct ns_common *orig_ns);
 bool ksu_susfs_mount_runtime_available(void);
 void ksu_susfs_set_mount_runtime_ready(bool ready);
+bool ksu_susfs_mntns_get_runtime_ready(void);
+void ksu_susfs_disable_mount_probe_fallback(void);
+void ksu_susfs_disable_mntns_probe_fallback(void);
 #endif
 
 #endif // __KSU_H_SUSFS_PROCFS

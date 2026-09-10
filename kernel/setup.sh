@@ -43,7 +43,7 @@ refresh_version_stamp() {
         return 0
     fi
 
-    KSU_TAG=$(git -C "$GKI_ROOT/$KSU_DIR" describe --tags --abbrev=0 2>/dev/null || true)
+    KSU_TAG=$(git -C "$GKI_ROOT/$KSU_DIR" describe --tags --always 2>/dev/null || true)
     {
         printf '%s\n' "$KSU_VERSION"
         printf '%s\n' "$KSU_TAG"

@@ -408,8 +408,10 @@ static void ksu_susfs_store_pkg_anchor_task(const char *pkg, uid_t user_id,
 		return;
 	}
 
+	read_lock(&tasklist_lock);
 	anchor = task->group_leader ? task->group_leader : task;
 	get_task_struct(anchor);
+	read_unlock(&tasklist_lock);
 
 	mutex_lock(&ksu_susfs_pkg_anchors_lock);
 	entry = ksu_susfs_find_pkg_anchor_locked(pkg, user_id);
@@ -467,7 +469,12 @@ static struct task_struct *ksu_susfs_find_mount_donor(const char *pkg, uid_t uid
 		if (task == current || nr >= ARRAY_SIZE(candidates)) {
 			continue;
 		}
-		if (!task->mm || !is_appuid(task_uid_val)) {
+		bool has_mm;
+
+		task_lock(task);
+		has_mm = task->mm != NULL;
+		task_unlock(task);
+		if (!has_mm || !is_appuid(task_uid_val)) {
 			continue;
 		}
 		if ((task_uid_val / PER_USER_RANGE) != user_id) {
@@ -616,9 +623,10 @@ static void ksu_susfs_isolated_ns_cb(struct callback_head *cb)
 		return;
 	}
 
-	if (donor->nsproxy && donor->nsproxy->mnt_ns) {
+	task_lock(donor);
+	if (donor->nsproxy && donor->nsproxy->mnt_ns)
 		donor_ns = donor->nsproxy->mnt_ns->ns.inum;
-	}
+	task_unlock(donor);
 
 	if (donor_ns && donor_ns == old_ns && path_ok) {
 		put_task_struct(donor);
@@ -1033,6 +1041,8 @@ ksu_susfs_handle_mntns_get(struct ns_common *orig_ns)
 }
 
 #ifdef CONFIG_KSU_HACK_ARM64_BRANCH_LINK
+static bool ksu_susfs_mntns_get_ready;
+
 static struct ns_common *ksu_susfs_mntns_get_fast(struct task_struct *task)
 {
 	struct ns_common *orig_ns;
@@ -1050,34 +1060,55 @@ static int ksu_susfs_patch_mntns_get(void)
 	struct ns_common *(*new_get)(struct task_struct *task);
 	void *dst;
 
-	if (ksu_susfs_orig_mntns_get) {
+	if (ksu_susfs_mntns_get_ready) {
 		return 0;
 	}
 
-	ksu_susfs_orig_mntns_get = mntns_operations.get;
+	ksu_susfs_orig_mntns_get = READ_ONCE(mntns_operations.get);
+	if (!ksu_susfs_orig_mntns_get)
+		return -EINVAL;
 	new_get = ksu_susfs_mntns_get_fast;
 	dst = (void *)&((struct proc_ns_operations *)&mntns_operations)->get;
-	return ksu_patch_text(dst, &new_get, sizeof(new_get),
-			      KSU_PATCH_TEXT_FLUSH_DCACHE);
+	if (ksu_patch_text(dst, &new_get, sizeof(new_get),
+			   KSU_PATCH_TEXT_FLUSH_DCACHE)) {
+		ksu_susfs_orig_mntns_get = NULL;
+		return -EIO;
+	}
+	ksu_susfs_mntns_get_ready = true;
+	return 0;
 }
 
-static void ksu_susfs_restore_mntns_get(void)
+static int ksu_susfs_restore_mntns_get(void)
 {
 	struct ns_common *(*orig_get)(struct task_struct *task);
+	struct ns_common *(*current_get)(struct task_struct *task);
 	void *dst;
 
-	if (!ksu_susfs_orig_mntns_get) {
-		return;
+	if (!ksu_susfs_mntns_get_ready || !ksu_susfs_orig_mntns_get) {
+		return 0;
 	}
 
 	orig_get = ksu_susfs_orig_mntns_get;
 	dst = (void *)&((struct proc_ns_operations *)&mntns_operations)->get;
-	if (ksu_patch_text(dst, &orig_get, sizeof(orig_get),
-			   KSU_PATCH_TEXT_FLUSH_DCACHE)) {
-		pr_err("susfs: failed to restore mntns get\n");
+	current_get = READ_ONCE(mntns_operations.get);
+	if (current_get == orig_get) {
+		ksu_susfs_mntns_get_ready = false;
+		ksu_susfs_orig_mntns_get = NULL;
+		return 0;
 	}
-
+	if (current_get != ksu_susfs_mntns_get_fast)
+		return -EBADE;
+	if (ksu_patch_text(dst, &orig_get, sizeof(orig_get),
+			   KSU_PATCH_TEXT_FLUSH_DCACHE))
+		return -EIO;
+	ksu_susfs_mntns_get_ready = false;
 	ksu_susfs_orig_mntns_get = NULL;
+	return 0;
+}
+
+bool ksu_susfs_mntns_get_runtime_ready(void)
+{
+	return READ_ONCE(ksu_susfs_mntns_get_ready);
 }
 
 void ksu_susfs_set_mount_runtime_ready(bool ready)
@@ -1092,8 +1123,12 @@ bool ksu_susfs_mount_runtime_available(void)
 #endif
 
 static int ksu_susfs_mntns_get_handler(struct kretprobe_instance *ri,
-				       struct pt_regs *regs)
+					       struct pt_regs *regs)
 {
+	#ifdef CONFIG_KSU_HACK_ARM64_BRANCH_LINK
+	if (ksu_susfs_mntns_get_runtime_ready())
+		return 0;
+	#endif
 	PT_REGS_RC(regs) = (unsigned long)ksu_susfs_handle_mntns_get(
 		(struct ns_common *)regs_return_value(regs));
 	return 0;
@@ -1603,6 +1638,10 @@ void ksu_susfs_handle_setuid(uid_t old_uid, uid_t new_uid)
 
 static void ksu_susfs_mount_runtime_disable(void)
 {
+#ifdef CONFIG_KSU_HACK_ARM64_BRANCH_LINK
+	int ret;
+#endif
+
 	ksu_susfs_restore_fop_open(&proc_mounts_operations,
 				   &ksu_susfs_orig_mounts_open);
 	ksu_susfs_restore_fop_open(&proc_mountinfo_operations,
@@ -1616,7 +1655,9 @@ static void ksu_susfs_mount_runtime_disable(void)
 	}
 
 #ifdef CONFIG_KSU_HACK_ARM64_BRANCH_LINK
-	ksu_susfs_restore_mntns_get();
+	ret = ksu_susfs_restore_mntns_get();
+	if (ret)
+		pr_err("susfs: failed to restore mntns get: %d\n", ret);
 #endif
 	ksu_susfs_destroy_kretprobe(&ksu_susfs_vfs_create_mount_rp);
 	ksu_susfs_destroy_kretprobe(&ksu_susfs_clone_mnt_rp);
@@ -1625,9 +1666,6 @@ static void ksu_susfs_mount_runtime_disable(void)
 	cancel_delayed_work_sync(&ksu_susfs_mount_window_retry_work);
 	ksu_susfs_mount_clear_hidden_all();
 	ksu_susfs_clear_pkg_anchors_all();
-	ksu_susfs_orig_show_mounts = NULL;
-	ksu_susfs_orig_show_mountinfo = NULL;
-	ksu_susfs_orig_show_mountstats = NULL;
 	WRITE_ONCE(ksu_susfs_mount_window_open, false);
 
 	if (static_key_enabled(&ksu_susfs_mount_hide_enabled)) {
@@ -1663,13 +1701,6 @@ static int ksu_susfs_mount_runtime_enable(void)
 		goto err_out;
 	}
 
-#ifdef CONFIG_KSU_HACK_ARM64_BRANCH_LINK
-	err = ksu_susfs_patch_mntns_get();
-	if (err) {
-		pr_warn("susfs: mnt namespace identity fast hook unavailable: %d\n",
-			err);
-	}
-#else
 	ksu_susfs_vfs_create_mount_rp = ksu_susfs_init_kretprobe(
 		"vfs_create_mount", ksu_susfs_vfs_create_mount_entry,
 		ksu_susfs_vfs_create_mount_handler,
@@ -1700,6 +1731,12 @@ static int ksu_susfs_mount_runtime_enable(void)
 					 ksu_susfs_mntns_get_handler, 0);
 	if (!ksu_susfs_mntns_get_rp) {
 		pr_warn("susfs: mnt namespace identity hook unavailable\n");
+	}
+#ifdef CONFIG_KSU_HACK_ARM64_BRANCH_LINK
+	err = ksu_susfs_patch_mntns_get();
+	if (err) {
+		pr_warn("susfs: mnt namespace identity fast hook unavailable: %d\n",
+			err);
 	}
 #endif
 
@@ -1737,6 +1774,18 @@ err_out:
 	return err;
 }
 
+void ksu_susfs_disable_mount_probe_fallback(void)
+{
+	ksu_susfs_destroy_kretprobe(&ksu_susfs_vfs_create_mount_rp);
+	ksu_susfs_destroy_kretprobe(&ksu_susfs_clone_mnt_rp);
+	ksu_susfs_destroy_kprobe(&ksu_susfs_cleanup_mnt_kp);
+}
+
+void ksu_susfs_disable_mntns_probe_fallback(void)
+{
+	ksu_susfs_destroy_kretprobe(&ksu_susfs_mntns_get_rp);
+}
+
 #if KSU_SUSFS_CMDLINE_USE_PROC_SHOW_HOOK
 static struct proc_dir_entry *
 ksu_susfs_find_proc_root_entry(const char *name, unsigned int len)
@@ -1770,7 +1819,10 @@ ksu_susfs_find_proc_root_entry(const char *name, unsigned int len)
 
 static int ksu_susfs_cmdline_show(struct seq_file *m, void *v)
 {
-	const char *cmdline = READ_ONCE(ksu_susfs_cmdline_active);
+	const char *cmdline;
+
+	mutex_lock(&ksu_susfs_cmdline_patch_lock);
+	cmdline = READ_ONCE(ksu_susfs_cmdline_active);
 
 	if (!cmdline) {
 		cmdline = READ_ONCE(ksu_susfs_orig_saved_command_line);
@@ -1783,6 +1835,7 @@ static int ksu_susfs_cmdline_show(struct seq_file *m, void *v)
 		seq_puts(m, cmdline);
 	}
 	seq_putc(m, '\n');
+	mutex_unlock(&ksu_susfs_cmdline_patch_lock);
 	return 0;
 }
 
@@ -1927,8 +1980,13 @@ static void ksu_susfs_cmdline_runtime_disable(void)
 #else
 	ksu_susfs_cmdline_show_hook_disable();
 #endif
+#if KSU_SUSFS_CMDLINE_USE_PROC_SHOW_HOOK
+	/* The show callback is serialized by ksu_susfs_cmdline_patch_lock. */
 	kfree(ksu_susfs_cmdline_shadow);
 	ksu_susfs_cmdline_shadow = NULL;
+#else
+	/* Stock proc readers cannot be admitted into our lock. */
+#endif
 	ksu_susfs_orig_saved_command_line = NULL;
 	ksu_susfs_cmdline_active = NULL;
 	ksu_susfs_cmdline_ready = false;

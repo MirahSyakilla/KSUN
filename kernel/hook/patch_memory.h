@@ -29,5 +29,7 @@
 
 unsigned long phys_from_virt(unsigned long addr, int *err);
 int ksu_patch_text(void *dst, void *src, size_t len, int flags);
+int ksu_patch_text_compare(void *dst, const void *expected, void *src,
+                           size_t len, int flags);
 
 #endif

@@ -13,6 +13,7 @@
 #include <linux/magic.h>
 #include <linux/namei.h>
 #include <linux/rculist.h>
+#include <linux/refcount.h>
 #include <linux/rcupdate.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
@@ -83,6 +84,8 @@ struct ksu_susfs_parent {
 	struct list_head all_list;
 	struct list_head rules;
 	struct inode *dir_inode;
+	refcount_t refs;
+	bool retiring;
 	char path[KSU_SUSFS_MAX_PATHNAME];
 };
 
@@ -117,6 +120,32 @@ struct ksu_susfs_proxy_ctx {
 	struct dir_context *orig_ctx;
 	struct ksu_susfs_parent *parent;
 };
+
+static void ksu_susfs_parent_put(struct ksu_susfs_parent *parent)
+{
+	if (parent && refcount_dec_and_test(&parent->refs))
+		kfree(parent);
+}
+
+static void ksu_susfs_iop_free_rcu(struct rcu_head *rcu)
+{
+	struct ksu_susfs_iop *wrapped =
+		container_of(rcu, struct ksu_susfs_iop, rcu);
+	struct ksu_susfs_parent *parent = wrapped->parent;
+
+	kfree(wrapped);
+	ksu_susfs_parent_put(parent);
+}
+
+static void ksu_susfs_fop_free_rcu(struct rcu_head *rcu)
+{
+	struct ksu_susfs_fop *wrapped =
+		container_of(rcu, struct ksu_susfs_fop, rcu);
+	struct ksu_susfs_parent *parent = wrapped->parent;
+
+	kfree(wrapped);
+	ksu_susfs_parent_put(parent);
+}
 
 static DEFINE_HASHTABLE(ksu_susfs_rules_ht, KSU_SUSFS_HASH_BITS);
 static DEFINE_HASHTABLE(ksu_susfs_names_ht, KSU_SUSFS_HASH_BITS);
@@ -761,7 +790,7 @@ static void ksu_susfs_hijacked_destroy_inode(struct inode *inode)
 		if (!wrapped_iop->had_private_flag) {
 			inode->i_flags &= ~S_PRIVATE;
 		}
-		kfree_rcu(wrapped_iop, rcu);
+		call_rcu(&wrapped_iop->rcu, ksu_susfs_iop_free_rcu);
 	}
 
 	wrapped_fop = __ksu_susfs_get(smp_load_acquire(&inode->i_fop),
@@ -771,7 +800,7 @@ static void ksu_susfs_hijacked_destroy_inode(struct inode *inode)
 			wrapped_fop->parent->dir_inode = NULL;
 		}
 		inode->i_fop = wrapped_fop->orig_fop;
-		kfree_rcu(wrapped_fop, rcu);
+		call_rcu(&wrapped_fop->rcu, ksu_susfs_fop_free_rcu);
 	}
 
 	wrapped_sop = __ksu_susfs_get(smp_load_acquire(&inode->i_sb->s_op),
@@ -864,8 +893,12 @@ static int ksu_susfs_hijack_parent_inode(struct ksu_susfs_parent *parent,
 		return -EOPNOTSUPP;
 	}
 
-	if (!__ksu_susfs_get(smp_load_acquire(&inode->i_op),
-			     struct ksu_susfs_iop, fake_iop)) {
+	wrapped_iop = __ksu_susfs_get(smp_load_acquire(&inode->i_op),
+				      struct ksu_susfs_iop, fake_iop);
+	if (wrapped_iop && wrapped_iop->parent != parent) {
+		return -EEXIST;
+	}
+	if (!wrapped_iop) {
 		wrapped_iop = kzalloc(sizeof(*wrapped_iop), GFP_KERNEL);
 		if (!wrapped_iop) {
 			return -ENOMEM;
@@ -876,6 +909,7 @@ static int ksu_susfs_hijack_parent_inode(struct ksu_susfs_parent *parent,
 		wrapped_iop->orig_iop = inode->i_op;
 		wrapped_iop->signature = KSU_SUSFS_SIGNATURE;
 		wrapped_iop->parent = parent;
+		refcount_inc(&parent->refs);
 		wrapped_iop->had_private_flag =
 			(inode->i_flags & S_PRIVATE) != 0;
 		wrapped_iop->fake_iop.lookup = ksu_susfs_hijacked_lookup;
@@ -883,9 +917,13 @@ static int ksu_susfs_hijack_parent_inode(struct ksu_susfs_parent *parent,
 		inode->i_flags |= S_PRIVATE;
 	}
 
-	if (inode->i_fop &&
-	    !__ksu_susfs_get(smp_load_acquire(&inode->i_fop),
-			     struct ksu_susfs_fop, fake_fop)) {
+	wrapped_fop = inode->i_fop ?
+		__ksu_susfs_get(smp_load_acquire(&inode->i_fop),
+				 struct ksu_susfs_fop, fake_fop) : NULL;
+	if (wrapped_fop && wrapped_fop->parent != parent) {
+		return -EEXIST;
+	}
+	if (inode->i_fop && !wrapped_fop) {
 		wrapped_fop = kzalloc(sizeof(*wrapped_fop), GFP_KERNEL);
 		if (!wrapped_fop) {
 			return -ENOMEM;
@@ -896,6 +934,7 @@ static int ksu_susfs_hijack_parent_inode(struct ksu_susfs_parent *parent,
 		wrapped_fop->orig_fop = inode->i_fop;
 		wrapped_fop->signature = KSU_SUSFS_SIGNATURE;
 		wrapped_fop->parent = parent;
+		refcount_inc(&parent->refs);
 
 #ifdef KSU_SUSFS_HAS_ITERATE_SHARED
 		if (wrapped_fop->fake_fop.iterate_shared) {
@@ -938,14 +977,14 @@ static void ksu_susfs_unhijack_parent_inode(struct ksu_susfs_parent *parent,
 		if (!wrapped_iop->had_private_flag) {
 			inode->i_flags &= ~S_PRIVATE;
 		}
-		kfree_rcu(wrapped_iop, rcu);
+		call_rcu(&wrapped_iop->rcu, ksu_susfs_iop_free_rcu);
 	}
 
 	wrapped_fop = __ksu_susfs_get(smp_load_acquire(&inode->i_fop),
 				      struct ksu_susfs_fop, fake_fop);
 	if (wrapped_fop && wrapped_fop->parent == parent) {
 		smp_store_release(&inode->i_fop, wrapped_fop->orig_fop);
-		kfree_rcu(wrapped_fop, rcu);
+		call_rcu(&wrapped_fop->rcu, ksu_susfs_fop_free_rcu);
 	}
 	spin_unlock(&inode->i_lock);
 
@@ -954,40 +993,23 @@ static void ksu_susfs_unhijack_parent_inode(struct ksu_susfs_parent *parent,
 
 static void ksu_susfs_restore_parent(struct ksu_susfs_parent *parent)
 {
-	struct inode *inode = parent->dir_inode;
+	struct inode *inode = READ_ONCE(parent->dir_inode);
 	struct dentry *alias;
 
 	if (!inode) {
 		return;
 	}
 
-	if (!igrab(inode)) {
-		parent->dir_inode = NULL;
-		return;
-	}
-
-	ksu_susfs_unhijack_parent_inode(parent, inode);
-
+	/* Keep dynamic wrappers alive for files that copied inode->i_fop. */
+	WRITE_ONCE(parent->retiring, true);
+	WRITE_ONCE(parent->dir_inode, NULL);
 	alias = d_find_alias(inode);
 	if (alias) {
 		shrink_dcache_parent(alias);
 		d_drop(alias);
 		dput(alias);
 	}
-
 	iput(inode);
-	parent->dir_inode = NULL;
-}
-
-static void ksu_susfs_restore_superblocks(void)
-{
-	struct ksu_susfs_sop *wrapped;
-	struct hlist_node *tmp;
-	int bkt;
-
-	hash_for_each_safe(ksu_susfs_sb_ht, bkt, tmp, wrapped, node) {
-		ksu_susfs_restore_superblock_one(wrapped->sb);
-	}
 }
 
 static int ksu_susfs_attach_parent_locked(struct ksu_susfs_parent *parent)
@@ -997,6 +1019,8 @@ static int ksu_susfs_attach_parent_locked(struct ksu_susfs_parent *parent)
 	int sb_hijacked;
 	int err;
 
+	if (READ_ONCE(parent->retiring))
+		return -EBUSY;
 	if (parent->dir_inode) {
 		return 0;
 	}
@@ -1007,13 +1031,18 @@ static int ksu_susfs_attach_parent_locked(struct ksu_susfs_parent *parent)
 	}
 
 	inode = d_backing_inode(resolved.dentry);
-	if (!inode || !S_ISDIR(inode->i_mode)) {
+	if (!inode || !inode->i_sb || !S_ISDIR(inode->i_mode)) {
 		path_put(&resolved);
-		return -ENOTDIR;
+		return inode && !inode->i_sb ? -ENODEV : -ENOTDIR;
+	}
+	if (!igrab(inode)) {
+		path_put(&resolved);
+		return -ESTALE;
 	}
 
 	sb_hijacked = ksu_susfs_hijack_superblock(inode->i_sb);
 	if (sb_hijacked < 0) {
+		iput(inode);
 		path_put(&resolved);
 		return sb_hijacked;
 	}
@@ -1024,11 +1053,13 @@ static int ksu_susfs_attach_parent_locked(struct ksu_susfs_parent *parent)
 		if (sb_hijacked > 0) {
 			ksu_susfs_restore_superblock_one(inode->i_sb);
 		}
+		iput(inode);
 		path_put(&resolved);
 		return err;
 	}
 
 	parent->dir_inode = inode;
+	WRITE_ONCE(parent->retiring, false);
 	path_put(&resolved);
 	return 0;
 }
@@ -1208,6 +1239,7 @@ static int ksu_susfs_add_rule(const char *visible_path, const char *backend_path
 
 		INIT_LIST_HEAD(&parent->all_list);
 		INIT_LIST_HEAD(&parent->rules);
+		refcount_set(&parent->refs, 1);
 		if (strscpy(parent->path, parent_path, sizeof(parent->path)) < 0) {
 			kfree(parent);
 			err = -ENAMETOOLONG;
@@ -1296,7 +1328,7 @@ out_unwind_parent:
 		ksu_susfs_restore_parent(parent);
 		hash_del(&parent->node);
 		list_del(&parent->all_list);
-		kfree(parent);
+		ksu_susfs_parent_put(parent);
 	}
 
 out_unlock:
@@ -1346,13 +1378,14 @@ static void ksu_susfs_clear_all(void)
 	list_for_each_entry(parent, &ksu_susfs_parent_list, all_list) {
 		ksu_susfs_restore_parent(parent);
 	}
-	ksu_susfs_restore_superblocks();
-
 	list_for_each_entry_safe(parent, parent_tmp, &ksu_susfs_parent_list,
 				 all_list) {
 		hash_del(&parent->node);
 		list_del(&parent->all_list);
-		list_add_tail(&parent->all_list, &free_parents);
+		if (refcount_read(&parent->refs) == 1)
+			list_add_tail(&parent->all_list, &free_parents);
+		else
+			ksu_susfs_parent_put(parent);
 	}
 
 	if (atomic_read(&ksu_susfs_rule_count) > 0) {
@@ -1379,7 +1412,7 @@ static void ksu_susfs_clear_all(void)
 
 	list_for_each_entry_safe(parent, parent_tmp, &free_parents, all_list) {
 		list_del(&parent->all_list);
-		kfree(parent);
+		ksu_susfs_parent_put(parent);
 	}
 }
 

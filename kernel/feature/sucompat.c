@@ -701,6 +701,7 @@ static void ksu_handle_execveat_init_mark_tracker(const char *filename)
 		pr_info("hook_manager: escape to root for init executing ksud\n");
 		escape_to_root_for_init();
 	} else if (likely(!strstr(filename, "/app_process") &&
+			  !strstr(filename, "/stub_zygote") &&
 			  !strstr(filename, "/adbd"))) {
 		pr_info("hook_manager: unmark %d exec %s\n", current->pid,
 			filename);

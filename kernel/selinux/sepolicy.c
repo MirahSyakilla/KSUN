@@ -292,8 +292,7 @@ static bool add_rule(struct policydb *db, const char *s, const char *t,
 static struct ebitmap *ksu_type_attr_map(struct policydb *db,
                                          struct type_datum *type)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0) || \
-    defined(KSU_COMPAT_HAS_MODERN_POLICYDB)
+#if defined(KSU_COMPAT_HAS_MODERN_POLICYDB)
     return &db->type_attr_map_array[type->value - 1];
 #elif defined(KSU_COMPAT_IS_HISI_LEGACY_HM2)
     return flex_array_get(db->type_attr_map_array, type->value - 1);
@@ -748,14 +747,35 @@ static bool add_filename_trans(struct policydb *db, const char *s, const char *t
     if (trans == NULL) {
         trans = (struct filename_trans_datum *)kcalloc(1, sizeof(*trans),
                                                        GFP_KERNEL);
+        if (!trans) {
+            pr_err("add_filename_trans: Failed to alloc datum\n");
+            return false;
+        }
         struct filename_trans_key *new_key =
             (struct filename_trans_key *)kzalloc(sizeof(*new_key), GFP_KERNEL);
+        if (!new_key) {
+            pr_err("add_filename_trans: Failed to alloc new_key\n");
+            kfree(trans);
+            return false;
+        }
         *new_key = key;
         new_key->name = kstrdup(key.name, GFP_KERNEL);
+        if (!new_key->name) {
+            pr_err("add_filename_trans: Failed to duplicate name\n");
+            kfree(new_key);
+            kfree(trans);
+            return false;
+        }
         trans->next = last;
         trans->otype = def->value;
-        hashtab_insert(&db->filename_trans, new_key, trans,
-                       filenametr_key_params);
+        if (hashtab_insert(&db->filename_trans, new_key, trans,
+                           filenametr_key_params)) {
+            pr_err("add_filename_trans: Failed to insert datum\n");
+            kfree(new_key->name);
+            kfree(new_key);
+            kfree(trans);
+            return false;
+        }
     }
 
     db->compat_filename_trans_count++;
@@ -780,12 +800,25 @@ static bool add_filename_trans(struct policydb *db, const char *s, const char *t
             (struct filename_trans *)kzalloc(sizeof(*new_key), GFP_KERNEL);
         if (!new_key) {
             pr_err("add_filename_trans: Failed to alloc new_key\n");
+            kfree(trans);
             return false;
         }
         *new_key = key;
         new_key->name = kstrdup(key.name, GFP_KERNEL);
+        if (!new_key->name) {
+            pr_err("add_filename_trans: Failed to duplicate name\n");
+            kfree(new_key);
+            kfree(trans);
+            return false;
+        }
         trans->otype = def->value;
-        hashtab_insert(db->filename_trans, new_key, trans);
+        if (hashtab_insert(db->filename_trans, new_key, trans)) {
+            pr_err("add_filename_trans: Failed to insert datum\n");
+            kfree(new_key->name);
+            kfree(new_key);
+            kfree(trans);
+            return false;
+        }
     }
 
     return ebitmap_set_bit(&db->filename_trans_ttypes, src->value - 1, 1) == 0;
@@ -1297,20 +1330,28 @@ int ksu_dup_policydb(struct policydb *old_db, struct policydb *new_db)
     void *data;
     int ret = 0;
     int len = 0;
+    size_t buffer_len;
 
     ksu_lock_sepolicy_legacy();
     len = old_db->len;
     ksu_unlock_sepolicy_legacy();
 
-    data = vmalloc(len);
+    buffer_len = len;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 1, 0) || \
+    defined(KSU_COMPAT_HAS_MODERN_POLICYDB)
+    /* policydb_read() may add one self-bit to each type's ebitmap. */
+    buffer_len += (size_t)old_db->p_types.nprim * (sizeof(u32) + sizeof(u64));
+#endif
+
+    data = vmalloc(buffer_len);
     if (!data) {
-        pr_err("alloc policy len %d\n", len);
+        pr_err("alloc policy buffer len %zu\n", buffer_len);
         ret = -ENOMEM;
         goto out_free_data;
     }
 
     fp.data = data;
-    fp.len = len;
+    fp.len = buffer_len;
 
     ksu_lock_sepolicy_legacy();
     ret = policydb_write(old_db, &fp);
@@ -1320,6 +1361,7 @@ int ksu_dup_policydb(struct policydb *old_db, struct policydb *new_db)
         goto out_free_data;
     }
     ksu_unlock_sepolicy_legacy();
+    len = buffer_len - fp.len;
 
     // https://android-review.googlesource.com/c/kernel/common/+/3009995
     // Android won't add these flags to policydb_write....
@@ -1352,7 +1394,7 @@ int ksu_dup_policydb(struct policydb *old_db, struct policydb *new_db)
         goto out_free_data;
     }
 
-    new_db->len = old_db->len;
+    new_db->len = len;
 
     vfree(data);
     ret = len;

@@ -37,7 +37,7 @@ static int ksu_inode_rename(struct inode *old_inode, struct dentry *old_dentry, 
                             struct dentry *new_dentry)
 {
     // skip kernel threads
-    if (!current->mm) {
+    if (current->flags & PF_KTHREAD) {
         return 0;
     }
 
