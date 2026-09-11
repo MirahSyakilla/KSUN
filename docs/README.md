@@ -211,10 +211,14 @@ boundaries, BL reach, duplicates), and fails closed if any REQUIRED site is
 missing. Addresses and site counts are therefore expected to differ between
 kernels, compilers, and configurations — that is the design, not a limitation.
 What is portable is the discovery/validation/patching/rollback machinery itself.
-Static analysis of an android13-5.15 GKI build confirmed every hook family has
-discoverable call sites there (e.g. `vfs_getattr_nosec` remains a standalone
-function with 21 sites on 5.15 vs a single site on the lisa 5.4 build); 5.15/
-6.x builds remain **unvalidated at runtime** until someone runs them.
+Binary validation against official GKI prebuilts confirmed every hook family
+has discoverable call sites on android13-5.15 and android14-6.1, and static
+source analysis confirms the family boundaries on 6.12 (site counts are
+deliberately per-build: e.g. `vfs_getattr_nosec` is standalone with 21 sites
+on 5.15 and 5 sites on 6.1 vs a single site on the lisa 5.4 build, and the
+fd-stat wrappers call `vfs_fstat` on 5.15/6.1 but inline through
+`vfs_getattr` on 5.4). Runtime validation on those targets has not been
+performed.
 
 Note on `stat-fd`: on the lisa 5.4 build `vfs_fstat()` is fully inlined into the
 fd-stat syscall wrappers (which call `vfs_getattr()` directly), so that family

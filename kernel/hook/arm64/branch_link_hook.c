@@ -39,11 +39,15 @@
 #define KSU_BL_SCAN_WIDTH (128 * sizeof(void *))
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
 #define KSU_BL_CONSERVATIVE_RUNTIME_PATCHES 1
-#define KSU_BL_MAX_RECORDS 96
-#else
-#define KSU_BL_CONSERVATIVE_RUNTIME_PATCHES 0
-#define KSU_BL_MAX_RECORDS 160
 #endif
+/*
+ * Record capacity must cover every manifest family's worst-case site count
+ * (core hook families + stat/exec/mount/susfs routes).  The historical 96
+ * cap for 6.6+ predates the expanded families and structurally guaranteed
+ * -ENOSPC fail-closed cascades; 160 covers the audited census (148 live on
+ * the reference 5.4 profile) with headroom on either kernel generation.
+ */
+#define KSU_BL_MAX_RECORDS 160
 #define KSU_AARCH64_BL_OPCODE 0x94000000U
 #define KSU_AARCH64_BL_MASK 0xfc000000U
 #define KSU_AARCH64_BRANCH_IMM_MASK 0x03ffffffU
@@ -299,6 +303,13 @@ static int ksu_arm64_bl_patch(unsigned long start, size_t width,
 	next_symbol = find_kernel_symbol_next_address(start);
 	if (next_symbol && next_symbol > start && next_symbol < end)
 		end = next_symbol;
+	/* Accepted residual: if neither a next symbol nor a symbol size is
+	 * available for `start`, the window stays at KSU_BL_SCAN_WIDTH and a
+	 * deep site yields -ENOENT (fail-closed) rather than overrunning.
+	 * A neighbor's site to the same target inside our window can satisfy
+	 * min_sites while our own deep site is missed -- census hole, not a
+	 * patch-safety issue; every patched site is still individually
+	 * verified and recorded. */
 
 	might_sleep();
 
@@ -610,6 +621,23 @@ static int ksu_bl_restore_records(void)
  */
 static int (*inode_permission_fn)(struct inode *inode, int mask);
 
+
+/* True when every branch-link record has been restored (family failure rolled
+ * back cleanly and NULLing a wrapper's fn slot is safe).  If any record could
+ * not be restored, live call sites may still branch into a wrapper whose slot
+ * would be dead -- keep the slot bound to the original instead of returning
+ * -EOPNOTSUPP from a hot VFS path. */
+static bool ksu_bl_records_all_restored(void)
+{
+	int i;
+
+	for (i = 0; i < ksu_bl_record_count; i++) {
+		if (ksu_bl_records[i].state == KSU_BL_RECORD_ACTIVE)
+			return false;
+	}
+	return true;
+}
+
 static int __nocfi ksu_do_inode_permission(struct inode *inode, int mask)
 {
 	int (*orig_inode_permission)(struct inode *, int);
@@ -715,16 +743,7 @@ static bool ksu_branch_link_patch_permission_family(void)
 	 * original function -- pristine semantics -- instead of denying
 	 * everything. */
 	if (!ready) {
-		bool all_restored = true;
-		int i;
-
-		for (i = 0; i < ksu_bl_record_count; i++) {
-			if (ksu_bl_records[i].state == KSU_BL_RECORD_ACTIVE) {
-				all_restored = false;
-				break;
-			}
-		}
-		if (all_restored)
+		if (ksu_bl_records_all_restored())
 			WRITE_ONCE(inode_permission_fn, NULL);
 		else
 			pr_warn("branch_link: permission family failed with "
@@ -839,8 +858,14 @@ static bool ksu_branch_link_patch_dpath_family(void)
 	pr_info("branch_link: dpath profile=%s family=%u/%u sites=%d\n",
 		"lisa-5.4", patched, found, count);
 	ready = target && count > 0 && found == patched;
-	if (!ready)
-		WRITE_ONCE(d_path_fn, NULL);
+	if (!ready) {
+		if (ksu_bl_records_all_restored())
+			WRITE_ONCE(d_path_fn, NULL);
+		else
+			pr_warn("branch_link: dpath family failed with "
+				"unrestorable sites; wrapper stays bound to "
+				"original\n");
+	}
 	return ready;
 }
 
@@ -1250,8 +1275,14 @@ static bool ksu_branch_link_patch_faccessat_family(void)
 		KSU_BL_FACCESSAT_PROFILE,
 		patched, found, count);
 	ready = target && count > 0 && found == patched;
-	if (!ready)
-		do_faccessat_fn = NULL;
+	if (!ready) {
+		if (ksu_bl_records_all_restored())
+			do_faccessat_fn = NULL;
+		else
+			pr_warn("branch_link: faccessat family failed with "
+				"unrestorable sites; wrapper stays bound to "
+				"original\n");
+	}
 	return ready;
 }
 
@@ -1300,8 +1331,14 @@ static bool ksu_branch_link_patch_readlink_family(void)
 	count = ksu_bl_record_patch_manifest(
 		"readlink/do_readlinkat", callers, ARRAY_SIZE(callers), target,
 		(unsigned long)ksu_do_readlinkat, &found, &patched);
-	if (count <= 0)
-		WRITE_ONCE(do_readlinkat_fn, NULL);
+	if (count <= 0) {
+		if (ksu_bl_records_all_restored())
+			WRITE_ONCE(do_readlinkat_fn, NULL);
+		else
+			pr_warn("branch_link: readlink family failed with "
+				"unrestorable sites; wrapper stays bound to "
+				"original\n");
+	}
 	pr_info("branch_link: readlink profile=%s family=%u/%u sites=%d\n",
 		KSU_BL_READLINK_PROFILE,
 		patched, found, count);
@@ -1427,6 +1464,11 @@ static int __nocfi ksu_vfs_statx(int dfd, struct filename *filename,
 	if (rebased)
 		lookup_name = rebased;
 #endif
+	if (unlikely(!vfs_statx_fn)) {
+		ret = -EOPNOTSUPP;
+		ksu_bl_handle_stat_result(stat, ret);
+		return ret;
+	}
 	ret = vfs_statx_fn(dfd, lookup_name, flags, stat, request_mask);
 #if defined(CONFIG_KSU_HOOKLESS_NOMOUNT) && \
 	LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
@@ -1454,6 +1496,11 @@ static int __nocfi ksu_vfs_statx(int dfd, const char __user *filename,
 #ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	ksu_nomount_lookup_scope_enter(&lookup_scope, dfd);
 #endif
+	if (unlikely(!vfs_statx_fn)) {
+		ret = -EOPNOTSUPP;
+		ksu_bl_handle_stat_result(stat, ret);
+		return ret;
+	}
 	ret = vfs_statx_fn(dfd, filename, flags, stat, request_mask);
 #ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	ksu_nomount_lookup_scope_exit(&lookup_scope);
@@ -1509,7 +1556,11 @@ static int __nocfi ksu_vfs_getattr_nosec(const struct path *path,
 					 struct kstat *stat, u32 request_mask,
 					 unsigned int query_flags)
 {
-	int ret = vfs_getattr_nosec_fn(path, stat, request_mask, query_flags);
+	int ret;
+
+	if (unlikely(!vfs_getattr_nosec_fn))
+		return -EOPNOTSUPP;
+	ret = vfs_getattr_nosec_fn(path, stat, request_mask, query_flags);
 
 	ksu_susfs_handle_vfs_getattr_nosec(path, stat, ret);
 	return ret;
@@ -1548,7 +1599,11 @@ static int (*vfs_fstat_fn)(unsigned int fd, struct kstat *stat);
 
 static int __nocfi ksu_vfs_fstat(unsigned int fd, struct kstat *stat)
 {
-	int ret = vfs_fstat_fn(fd, stat);
+	int ret;
+
+	if (unlikely(!vfs_fstat_fn))
+		return -EOPNOTSUPP;
+	ret = vfs_fstat_fn(fd, stat);
 
 	/* This 5.4 LTO tree emits vfs_fstat() as a private helper that performs
 	 * getattr through an indirect inode-operation call.  There is therefore no
@@ -1597,6 +1652,10 @@ static int __nocfi ksu_user_statfs(const char __user *pathname,
 retry:
 	ret = user_path_at(AT_FDCWD, pathname, lookup_flags, &path);
 	if (!ret) {
+		if (unlikely(!vfs_statfs_fn)) {
+			path_put(&path);
+			return -EOPNOTSUPP;
+		}
 		ret = vfs_statfs_fn(&path, statfs);
 		ksu_handle_statfs_result(&path, statfs, ret);
 		path_put(&path);
@@ -1614,6 +1673,10 @@ static int __nocfi ksu_fd_statfs(int fd, struct kstatfs *statfs)
 	int ret = -EBADF;
 
 	if (f.file) {
+		if (unlikely(!vfs_statfs_fn)) {
+			fdput(f);
+			return -EOPNOTSUPP;
+		}
 		ret = vfs_statfs_fn(&f.file->f_path, statfs);
 		ksu_handle_statfs_result(&f.file->f_path, statfs, ret);
 		fdput(f);
@@ -2184,8 +2247,14 @@ static bool ksu_branch_link_patch_susfs(void)
 			ARRAY_SIZE(open_scope_callers), open_scope_targets,
 			ARRAY_SIZE(open_scope_targets), &open_scope_found,
 			&open_scope_patched);
-		if (open_scope_count <= 0)
-			WRITE_ONCE(do_sys_open_fn, NULL);
+		if (open_scope_count <= 0) {
+			if (ksu_bl_records_all_restored())
+				WRITE_ONCE(do_sys_open_fn, NULL);
+			else
+				pr_warn("branch_link: open-scope family failed "
+					"with unrestorable sites; wrapper "
+					"stays bound to original\n");
+		}
 		ksu_bl_open_scope_ready = open_scope_count > 0 &&
 			open_scope_found == open_scope_patched;
 		pr_info("branch_link: open dfd scope required=%u/%u sites=%d ready=%d\n",
@@ -2221,8 +2290,14 @@ static bool ksu_branch_link_patch_susfs(void)
 		} else {
 			open_count = -ENOENT;
 		}
-		if (open_count <= 0)
-			WRITE_ONCE(do_filp_open_fn, NULL);
+		if (open_count <= 0) {
+			if (ksu_bl_records_all_restored())
+				WRITE_ONCE(do_filp_open_fn, NULL);
+			else
+				pr_warn("branch_link: susfs/do_filp_open family "
+					"failed with unrestorable sites; wrapper "
+					"stays bound to original\n");
+		}
 		pr_info("branch_link: susfs/do_filp_open required=%u/%u sites=%d\n",
 			open_redirect_patched, open_redirect_found,
 			open_count);
