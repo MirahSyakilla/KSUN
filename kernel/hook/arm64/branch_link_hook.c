@@ -1466,6 +1466,11 @@ static int __nocfi ksu_vfs_statx(int dfd, struct filename *filename,
 #endif
 	if (unlikely(!vfs_statx_fn)) {
 		ret = -EOPNOTSUPP;
+#if defined(CONFIG_KSU_HOOKLESS_NOMOUNT) && \
+	LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+		if (rebased)
+			putname(rebased);
+#endif
 		ksu_bl_handle_stat_result(stat, ret);
 		return ret;
 	}
@@ -1498,6 +1503,11 @@ static int __nocfi ksu_vfs_statx(int dfd, const char __user *filename,
 #endif
 	if (unlikely(!vfs_statx_fn)) {
 		ret = -EOPNOTSUPP;
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
+		ksu_nomount_lookup_scope_exit(&lookup_scope);
+#endif
+		if (old_cred)
+			revert_creds(old_cred);
 		ksu_bl_handle_stat_result(stat, ret);
 		return ret;
 	}
@@ -2332,8 +2342,15 @@ static bool ksu_branch_link_patch_susfs(void)
 			ARRAY_SIZE(getattr_callers), nosec_addr,
 			(unsigned long)ksu_vfs_getattr_nosec, &getattr_found,
 			&getattr_patched);
-		if (getattr_count <= 0)
-			WRITE_ONCE(vfs_getattr_nosec_fn, NULL);
+		if (getattr_count <= 0) {
+			if (ksu_bl_records_all_restored())
+				WRITE_ONCE(vfs_getattr_nosec_fn, NULL);
+			else
+				pr_warn("branch_link: susfs/vfs_getattr_nosec "
+					"family failed with unrestorable "
+					"sites; wrapper stays bound to "
+					"original\n");
+		}
 		pr_info("branch_link: susfs/vfs_getattr_nosec required=%u/%u sites=%d\n",
 			getattr_patched, getattr_found, getattr_count);
 		direct_getattr_ready = nosec_addr && getattr_count > 0 &&
