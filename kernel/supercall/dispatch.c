@@ -17,7 +17,7 @@
 #include "manager/manager_identity.h"
 #include "selinux/selinux.h"
 #include "infra/file_wrapper.h"
-#ifdef CONFIG_KSU_KPROBES_HOOK
+#ifdef CONFIG_KSU_HOOK_CORE
 #include "hook/tp_marker.h"
 #endif
 #include "policy/app_profile.h"
@@ -375,7 +375,7 @@ static int do_set_app_profile(void __user *arg)
     ret = ksu_set_app_profile(&cmd.profile);
     if (!ret) {
         ksu_persistent_allow_list();
-#if defined(CONFIG_KSU_KPROBES_HOOK) && \
+#if defined(CONFIG_KSU_HOOK_CORE) && \
         !defined(CONFIG_KSU_TAMPER_SYSCALL_TABLE)
         ksu_mark_running_process();
 #endif
@@ -446,7 +446,7 @@ static int do_get_wrapper_fd(void __user *arg)
 
 static int do_manage_mark(void __user *arg)
 {
-#ifdef CONFIG_KSU_KPROBES_HOOK
+#ifdef CONFIG_KSU_HOOK_CORE
     struct ksu_manage_mark_cmd cmd;
     int ret = 0;
 
@@ -705,8 +705,14 @@ static int do_get_hook_mode(void __user *arg)
 {
     struct ksu_get_hook_mode_cmd cmd = {0};
 
-#ifdef CONFIG_KSU_MANUAL_HOOK
+#if defined(CONFIG_KSU_MANUAL_HOOK)
     const char *type = "Manual";
+#elif defined(CONFIG_KSU_TAMPER_SYSCALL_TABLE) && \
+    defined(CONFIG_KSU_HACK_ARM64_BRANCH_LINK)
+    /* Report every active interception mechanism; both patch different
+     * structures (syscall table vs VFS/syscall call sites) and are fully
+     * composed in this configuration. */
+    const char *type = "SyscallTable+BranchLink";
 #elif defined(CONFIG_KSU_TAMPER_SYSCALL_TABLE)
     const char *type = "SyscallTable";
 #elif defined(CONFIG_KSU_HACK_ARM64_BRANCH_LINK)

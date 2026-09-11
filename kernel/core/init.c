@@ -12,7 +12,7 @@
 #include "klog.h" // IWYU pragma: keep
 #include "manager/manager_observer.h"
 #include "manager/throne_tracker.h"
-#ifdef CONFIG_KSU_KPROBES_HOOK
+#ifdef CONFIG_KSU_HOOK_CORE
 #include "hook/syscall_hook_manager.h"
 #include "hook/syscall_hook.h"
 #include "hook/lsm_hook.h"
@@ -30,10 +30,10 @@
 #include "feature/sulog.h"
 #include "infra/symbol_resolver.h"
 #include "selinux/execmem_compat.h"
-#ifdef CONFIG_KSU_KPROBES_SUSFS
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
 #include "susfs/susfs.h"
 #endif
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 #include "nomount/nomount.h"
 #endif
 
@@ -139,7 +139,7 @@ int __init kernelsu_init(void)
 	}
 
 	ksu_init_symbol_resolver();
-#ifdef CONFIG_KSU_KPROBES_HOOK
+#ifdef CONFIG_KSU_HOOK_CORE
 	ksu_syscall_hook_init();
 #endif
 
@@ -149,7 +149,7 @@ int __init kernelsu_init(void)
 
 	ksu_adb_root_init();
 
-#ifdef CONFIG_KSU_KPROBES_HOOK
+#ifdef CONFIG_KSU_HOOK_CORE
 	ksu_lsm_hook_init();
 	ksu_execmem_compat_init();
 #else
@@ -158,10 +158,10 @@ int __init kernelsu_init(void)
 
 	ksu_selinux_hide_init();
 
-#ifdef CONFIG_KSU_KPROBES_SUSFS
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
 	ksu_susfs_init();
 #endif
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	ksu_nomount_init();
 #endif
 
@@ -182,7 +182,7 @@ int __init kernelsu_init(void)
 		ksu_allowlist_init();
 		ksu_load_allow_list();
 
-#ifdef CONFIG_KSU_KPROBES_HOOK
+#ifdef CONFIG_KSU_HOOK_CORE
 		ksu_syscall_hook_manager_init();
 #endif
 
@@ -199,7 +199,7 @@ int __init kernelsu_init(void)
 		}
 
 	} else {
-#ifdef CONFIG_KSU_KPROBES_HOOK
+#ifdef CONFIG_KSU_HOOK_CORE
 		ksu_syscall_hook_manager_init();
 #endif
 
@@ -222,17 +222,17 @@ int __init kernelsu_init(void)
 
 void __exit kernelsu_exit(void)
 {
-#ifdef CONFIG_KSU_KPROBES_HOOK
+#ifdef CONFIG_KSU_HOOK_CORE
 	// Phase 1: Stop all hooks first to prevent new callbacks
 	ksu_syscall_hook_manager_exit();
 #endif
 
 	ksu_supercalls_exit();
 
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	ksu_nomount_exit();
 #endif
-#ifdef CONFIG_KSU_KPROBES_SUSFS
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
 	ksu_susfs_exit();
 #endif
 
@@ -251,7 +251,7 @@ void __exit kernelsu_exit(void)
 
 	ksu_selinux_hide_exit();
 
-#ifdef CONFIG_KSU_KPROBES_HOOK
+#ifdef CONFIG_KSU_HOOK_CORE
 	ksu_execmem_compat_exit();
 	ksu_lsm_hook_exit();
 #endif

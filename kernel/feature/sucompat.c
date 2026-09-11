@@ -36,10 +36,10 @@
 #include "policy/app_profile.h"
 #include "selinux/selinux.h"
 #include "compat/kernel_compat.h"
-#ifdef CONFIG_KSU_KPROBES_HOOK
+#ifdef CONFIG_KSU_HOOK_CORE
 #include "hook/syscall_hook.h"
 #endif
-#if !defined(CONFIG_KSU_KPROBES_HOOK) || defined(CONFIG_KSU_HACK_ARM64_BRANCH_LINK)
+#if !defined(CONFIG_KSU_HOOK_CORE) || defined(CONFIG_KSU_HACK_ARM64_BRANCH_LINK)
 #include "feature/adb_root.h"
 #endif
 #ifdef CONFIG_KSU_HACK_ARM64_BRANCH_LINK
@@ -149,7 +149,7 @@ static __always_inline void ksu_sucompat_set_argv0_su(struct user_arg_ptr *argv)
 			       (const char __user *__user *)argv->ptr.native);
 }
 
-#if !defined(CONFIG_KSU_KPROBES_HOOK) || defined(CONFIG_KSU_HACK_ARM64_BRANCH_LINK)
+#if !defined(CONFIG_KSU_HOOK_CORE) || defined(CONFIG_KSU_HACK_ARM64_BRANCH_LINK)
 static __always_inline bool
 ksu_sucompat_kernel_system_path_matches(const char *filename)
 {
@@ -236,7 +236,7 @@ ksu_sucompat_kernel_exec_path_matches(const char *filename)
 }
 #endif
 
-#ifdef CONFIG_KSU_KPROBES_HOOK
+#ifdef CONFIG_KSU_HOOK_CORE
 static __always_inline bool
 ksu_sucompat_user_system_path_matches(const char __user *path)
 {
@@ -649,10 +649,10 @@ do_orig_execve:
 	return ksu_invoke_syscall_nr(orig_nr, regs);
 }
 
-#endif // CONFIG_KSU_KPROBES_HOOK
+#endif // CONFIG_KSU_HOOK_CORE
 
-#if !defined(CONFIG_KSU_KPROBES_HOOK) || defined(CONFIG_KSU_HACK_ARM64_BRANCH_LINK)
-#ifndef CONFIG_KSU_KPROBES_HOOK
+#if !defined(CONFIG_KSU_HOOK_CORE) || defined(CONFIG_KSU_HACK_ARM64_BRANCH_LINK)
+#ifndef CONFIG_KSU_HOOK_CORE
 extern bool ksud_execve_key;
 static inline bool ksu_ksud_execve_hook_enabled(void)
 {
@@ -752,7 +752,7 @@ int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr,
 				   __never_use_flags);
 }
 
-#endif // !CONFIG_KSU_KPROBES_HOOK || CONFIG_KSU_HACK_ARM64_BRANCH_LINK
+#endif // !CONFIG_KSU_HOOK_CORE || CONFIG_KSU_HACK_ARM64_BRANCH_LINK
 
 // sucompat: permitted process can execute 'su' to gain root access.
 void __init ksu_sucompat_init()

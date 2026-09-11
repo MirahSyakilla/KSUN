@@ -5,12 +5,13 @@ config KSU
 	depends on EXT4_FS
 	default y
 	help
-	  Enable kernel-level root privileges on Android System.
-	  Requires CONFIG_EXT4_FS for `ext4_unregister_sysfs`.
-	  Use KSU_KPROBES_HOOK on GKI kernels with kprobe support, or
-	  KSU_MANUAL_HOOK for legacy/non-GKI integrations.
-	  To compile as a module, choose M here: the
-	  module will be called kernelsu.
+  Enable kernel-level root privileges on Android System.
+  Requires CONFIG_EXT4_FS for `ext4_unregister_sysfs`.
+  Use KSU_HOOK_CORE (syscall-table tamper and/or ARM64 branch-link)
+  for the runtime hookless implementation, or KSU_MANUAL_HOOK for
+  legacy kernels whose sources already contain manual KSU hooks.
+  To compile as a module, choose M here: the
+  module will be called kernelsu.
 
 config KSU_DEBUG
 	bool "KernelSU debug mode"
@@ -40,27 +41,35 @@ config KSU_DISABLE_POLICY
 config KSU_MANUAL_HOOK
 	bool "KernelSU manual hook mode."
 	depends on KSU && KSU != m
-	default y if !KPROBES
 	default n
 	help
 	  Enable manual hook support.
 
-config KSU_KPROBES_HOOK
-	bool "KernelSU tracepoint+kretprobe hook"
+config KSU_HOOK_CORE
+	bool "KernelSU runtime hook core (syscall-table / branch-link / LSM slot patch)"
 	depends on KSU && !KSU_MANUAL_HOOK
-	depends on KRETPROBES && KPROBES && HAVE_SYSCALL_TRACEPOINTS
-	default y if KPROBES && KRETPROBES && HAVE_SYSCALL_TRACEPOINTS
-	default y if !KSU_MANUAL_HOOK
+	default y
 	help
-	  Enable KPROBES, KRETPROBES and TRACEPOINT hook for KernelSU core.
-	  ARM64 syscall and LSM layouts are selected from the target headers.
-	  Kernels below 5.10 still require the dependencies above and should be
-	  validated on the target device.
+	  KernelSU's runtime interception core: syscall-table tamper
+	  dispatch, ARM64 branch-link call-site patching, and the runtime
+	  LSM slot patcher.  All of these patch already-existing kernel
+	  binary structures; none of them require or use kprobes or
+	  kretprobes.  This mode is fully independent of the kernel's
+	  CONFIG_KPROBES/CONFIG_KRETPROBES settings -- enabling those for
+	  unrelated purposes does not change KSU's behavior.
+	  Legacy kprobe/tracepoint fallback paths (sys_enter redirect,
+	  regfunc kretprobes, reboot supercall kprobe) are compiled inside
+	  this block only when the kernel provides CONFIG_KPROBES/
+	  CONFIG_KRETPROBES/HAVE_SYSCALL_TRACEPOINTS AND
+	  KSU_TAMPER_SYSCALL_TABLE is not selected; they exist for
+	  pre-hookless profile compatibility and are never active in the
+	  TAMPER/BRANCH_LINK configuration.
 
 config KSU_TAMPER_SYSCALL_TABLE
 	bool "KernelSU syscall-table tamper hook"
-	depends on KSU_KPROBES_HOOK
+	depends on KSU_HOOK_CORE
 	depends on ARM64 || X86_64
+	default y if !HAVE_SYSCALL_TRACEPOINTS
 	default n
 	help
 	  Replace hooked syscall table entries directly instead of routing
@@ -69,22 +78,23 @@ config KSU_TAMPER_SYSCALL_TABLE
 	  KernelSU-Next's central syscall handlers.
 
 config KSU_HACK_ARM64_BRANCH_LINK
-	bool "Experimental KernelSU ARM64 branch-link hook"
-	depends on KSU_KPROBES_HOOK && ARM64 && KALLSYMS
-	depends on !KSU_TAMPER_SYSCALL_TABLE
+	bool "KernelSU ARM64 branch-link hook"
+	depends on KSU_HOOK_CORE && ARM64 && KALLSYMS
+	default y if ARM64
 	default n
 	help
-	  EXPERIMENTAL: patch selected ARM64 syscall callsites by rewriting
-	  branch-with-link instructions so sucompat/exec path handling can run
-	  without redirecting those syscalls through the tracepoint dispatcher.
+	  Patch selected ARM64 syscall and VFS call sites by rewriting
+	  branch-with-link instructions to KSU wrappers, so sucompat/exec
+	  path handling and the hookless SUSFS/NoMount families run without
+	  kprobes/kretprobes or the tracepoint dispatcher.
 	  This is intended for Android ARM64 kernels with the standard syscall
 	  wrapper layout and should be validated on the target device. Module
 	  builds still require the hook text to land within the ARM64 BL
 	  +/-128 MiB range, otherwise patching will be refused at runtime.
 
-config KSU_KPROBES_SUSFS
+config KSU_HOOKLESS_SUSFS
 	bool "KernelSU hookless SUSFS"
-	depends on KSU && KSU != m && KSU_KPROBES_HOOK
+	depends on KSU && KSU != m && KSU_HOOK_CORE
 	default n
 	help
 	  Enable the hookless SUSFS runtime hosted entirely inside
@@ -93,7 +103,7 @@ config KSU_KPROBES_SUSFS
 	  per-version source patching.
 	  MM and VFS compatibility is selected from the APIs present in the
 	  source tree. Stock-style 4.19 and 5.4 ARM64 kernels are the primary
-	  legacy targets; 4.9 is best-effort when all Kprobes, syscall
+	  legacy targets; 4.9 is best-effort when all syscall
 	  tracepoint, procfs, and Android vendor dependencies are present.
 	  Supported on this branch:
 	  - sus_path / add_sus_path
@@ -110,9 +120,9 @@ config KSU_KPROBES_SUSFS
 	  direct branch-link/function-pointer hooks for kstat and mount
 	  tracking instead of installing its kprobe/kretprobe runtime hooks.
 
-config KSU_KPROBES_NOMOUNT
+config KSU_HOOKLESS_NOMOUNT
 	bool "KernelSU hookless NoMount"
-	depends on KSU_KPROBES_SUSFS
+	depends on KSU_HOOKLESS_SUSFS
 	depends on NET
 	depends on ARM64
 	depends on KALLSYMS
@@ -128,8 +138,9 @@ config KSU_KPROBES_NOMOUNT
 	  whiteout, synthetic intermediate virtual directories, UID
 	  blocking, rule listing, and clear commands. It intentionally
 	  avoids fabricated inodes and superblock/VFS-operation wrappers.
-	  It requires ARM64 kprobe entry redirection and kretprobes on the
-	  target kernel; Android ARM64 4.19 and 5.4 configurations with those
-	  facilities are the supported targets.
+	  Interception is implemented with existing compiled call-site
+	  branch rewrites and existing function-pointer/ops-table patches;
+	  Android ARM64 4.19 and 5.4 configurations are the supported
+	  targets.
 
 endmenu

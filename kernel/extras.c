@@ -140,19 +140,26 @@ int ksu_handle_slow_avc_audit(u32 *tsid)
 #include "arch.h"
 static struct kprobe *slow_avc_audit_kp;
 static bool slow_avc_audit_hook_installed;
-//	.symbol_name = "slow_avc_audit",
-//	.pre_handler = slow_avc_audit_pre_handler,
+/*
+ * DEAD on this target: CONFIG_AUDIT=n removes slow_avc_audit() from the
+ * image entirely (register_kprobe fails with -ENOENT at boot).  The kprobe
+ * code is retained only as a config-conditional fallback: a future
+ * CONFIG_AUDIT=y build would restore the symbol and this path would work
+ * unchanged.  No alternative mechanism is added for AUDIT=y -- avc log
+ * spoofing is intentionally unsupported there until a hookless route
+ * (e.g. an existing compiled BL site) is implemented for that profile.
+ */
 static int slow_avc_audit_pre_handler(struct kprobe *p, struct pt_regs *regs)
 {
 	if (atomic_read(&disable_spoof))
 		return 0;
 
-	/* 
+	/*
 	 * for < 4.17 int slow_avc_audit(u32 ssid, u32 tsid
 	 * for >= 4.17 int slow_avc_audit(struct selinux_state *state, u32 ssid, u32 tsid
 	 * for >= 6.4 int slow_avc_audit(u32 ssid, u32 tsid
 	 * not to mention theres also DKSU_HAS_SELINUX_STATE
-	 * since its hard to make sure this selinux state thing 
+	 * since its hard to make sure this selinux state thing
 	 * cross crossing with 4.17 ~ 6.4's where slow_avc_audit
 	 * changes abi (tsid in arg2 vs arg3)
 	 */
@@ -214,8 +221,8 @@ static int __ksu_avc_spoof_enable_locked(void)
 		slow_avc_audit_kp = init_kprobe("slow_avc_audit",
 						slow_avc_audit_pre_handler);
 		if (!slow_avc_audit_kp) {
-			pr_info("avc_spoof/init: slow_avc_audit hook install failed!\n");
-			return -EINVAL;
+			pr_info("avc_spoof/init: slow_avc_audit symbol unavailable (CONFIG_AUDIT=n): spoofing disabled\n");
+			return 0;
 		}
 		slow_avc_audit_hook_installed = true;
 	}

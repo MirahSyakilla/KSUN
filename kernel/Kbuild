@@ -46,7 +46,7 @@ else ifeq ($(CONFIG_X86_64),y)
 kernelsu-objs += hook/x86_64/patch_memory.o
 endif
 
-ifeq ($(CONFIG_KSU_KPROBES_HOOK),y)
+ifeq ($(CONFIG_KSU_HOOK_CORE),y)
 kernelsu-objs += hook/lsm_hook.o
 kernelsu-objs += hook/syscall_event_bridge.o
 kernelsu-objs += hook/syscall_hook_manager.o
@@ -100,7 +100,7 @@ kernelsu-objs += feature/adb_root.o
 
 kernelsu-objs += feature/selinux_hide.o
 
-ifeq ($(CONFIG_KSU_KPROBES_SUSFS),y)
+ifeq ($(CONFIG_KSU_HOOKLESS_SUSFS),y)
 kernelsu-objs += susfs/core.o
 kernelsu-objs += susfs/kstat.o
 kernelsu-objs += susfs/procfs.o
@@ -261,7 +261,7 @@ ccflags-y += -DKSU_SUSFS_HAS_ITERATE
 endif
 endif
 
-ifeq ($(CONFIG_KSU_KPROBES_NOMOUNT),y)
+ifeq ($(CONFIG_KSU_HOOKLESS_NOMOUNT),y)
 kernelsu-objs += nomount/core.o
 kernelsu-objs += nomount/hooks.o
 kernelsu-objs += nomount/netlink.o

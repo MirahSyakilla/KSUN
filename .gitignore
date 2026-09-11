@@ -7,3 +7,7 @@ validation/tests/bin/
 validation/appuid-tester/build/
 validation/appuid-tester/libs/
 validation/appuid-tester/debug.keystore
+validation/audit/dpath/
+validation/audit/getattr/
+validation/audit/getname/
+validation/audit/final/

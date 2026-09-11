@@ -27,8 +27,8 @@
 #include "infra/symbol_resolver.h"
 #include "klog.h" // IWYU pragma: keep
 #include "runtime/ksud.h"
-#ifdef CONFIG_KSU_KPROBES_SUSFS
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 #include "nomount/nomount.h"
 #endif
 #include "susfs/kstat.h"
@@ -101,6 +101,11 @@ struct ksu_bl_manifest_caller {
 	const char *name;
 	u8 classification;
 	unsigned int min_sites;
+	/* Scan-window override for callers whose site sits deeper into the
+	 * function than KSU_BL_SCAN_WIDTH (the scanner is additionally
+	 * bounded by the next symbol, so a larger window cannot spill into
+	 * the next function).  0 = use the default width. */
+	u16 width;
 };
 
 /*
@@ -128,6 +133,11 @@ static int ksu_bl_record_count;
 static enum ksu_bl_state ksu_bl_state = KSU_BL_IDLE;
 static bool ksu_bl_faccessat_ready;
 static bool ksu_bl_readlink_ready;
+static bool ksu_bl_permission_ready;
+static bool ksu_bl_dpath_ready;
+static bool ksu_bl_getname_flags_ready;
+static bool ksu_bl_getname_kernel_ready;
+static bool ksu_bl_iterate_ready;
 static bool ksu_bl_stat_path_ready;
 static bool ksu_bl_stat_fd_ready;
 static bool ksu_bl_statfs_ready;
@@ -314,8 +324,23 @@ static int ksu_arm64_bl_patch(unsigned long start, size_t width,
 	return -ENOENT;
 }
 
+static int ksu_bl_record_patch_width(const char *name, unsigned long start,
+				     unsigned long original, unsigned long hook,
+				     size_t width);
+static int ksu_bl_record_patch_all_width(const char *name, unsigned long start,
+					 unsigned long original,
+					 unsigned long hook, u16 width);
+
 static int ksu_bl_record_patch(const char *name, unsigned long start,
 			       unsigned long original, unsigned long hook)
+{
+	return ksu_bl_record_patch_width(name, start, original, hook,
+					 KSU_BL_SCAN_WIDTH);
+}
+
+static int ksu_bl_record_patch_width(const char *name, unsigned long start,
+				     unsigned long original, unsigned long hook,
+				     size_t width)
 {
 	struct ksu_bl_record *record;
 	unsigned long site = 0;
@@ -326,7 +351,7 @@ static int ksu_bl_record_patch(const char *name, unsigned long start,
 	if (ksu_bl_record_count >= ARRAY_SIZE(ksu_bl_records))
 		return -ENOSPC;
 
-	ret = ksu_arm64_bl_patch(start, KSU_BL_SCAN_WIDTH, original, hook,
+	ret = ksu_arm64_bl_patch(start, width, original, hook,
 				 &site, &before_word, &replacement_word);
 	if (ret)
 		return ret;
@@ -406,12 +431,21 @@ static int ksu_bl_restore_records_from(int first_record)
 static int ksu_bl_record_patch_all(const char *name, unsigned long start,
 				   unsigned long original, unsigned long hook)
 {
+	return ksu_bl_record_patch_all_width(name, start, original, hook, 0);
+}
+
+static int ksu_bl_record_patch_all_width(const char *name, unsigned long start,
+					 unsigned long original,
+					 unsigned long hook, u16 width)
+{
 	int first_record = ksu_bl_record_count;
 	int count = 0;
 	int ret;
+	size_t scan_width = width ? width : KSU_BL_SCAN_WIDTH;
 
 	do {
-		ret = ksu_bl_record_patch(name, start, original, hook);
+		ret = ksu_bl_record_patch_width(name, start, original, hook,
+						scan_width);
 		if (!ret)
 			count++;
 	} while (!ret);
@@ -514,7 +548,8 @@ static int ksu_bl_record_patch_manifest(
 				name, callers[i].name);
 			continue;
 		}
-		ret = ksu_bl_record_patch_all(name, caller, original, hook);
+		ret = ksu_bl_record_patch_all_width(name, caller, original,
+						    hook, callers[i].width);
 		if (ret > 0 && (unsigned int)ret >= callers[i].min_sites) {
 			count += ret;
 			if (callers[i].classification == KSU_BL_SITE_REQUIRED) {
@@ -557,6 +592,401 @@ static int ksu_bl_restore_records(void)
 {
 	return ksu_bl_restore_records_from(0);
 }
+
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
+/*
+ * Permission family: replaces the inode_permission/generic_permission
+ * kretprobe pair.  Every caller of inode_permission() in the image is
+ * branch-rewritten to a wrapper that runs the original permission logic
+ * first and then force-allows a denial when NoMount policy claims the
+ * access for a redirected backend inode.  This keeps the kretprobe
+ * semantics (override the FINAL result, after DAC, devcgroup and SELinux
+ * legs) while removing all probe machinery from the VFS hot path.
+ *
+ * generic_permission() needs no separate coverage: every generic_permission
+ * call site in this image is nested inside inode_permission()
+ * (do_inode_permission is inlined), so patching inode_permission's callers
+ * covers both legs.
+ */
+static int (*inode_permission_fn)(struct inode *inode, int mask);
+
+static int __nocfi ksu_do_inode_permission(struct inode *inode, int mask)
+{
+	int (*orig_inode_permission)(struct inode *, int);
+	int ret;
+
+	orig_inode_permission = READ_ONCE(inode_permission_fn);
+	if (unlikely(!orig_inode_permission))
+		return -EOPNOTSUPP;
+	ret = orig_inode_permission(inode, mask);
+	if (ret && ksu_nomount_handle_permission(inode, mask))
+		ret = 0;
+	return ret;
+}
+
+static bool ksu_branch_link_patch_permission_family(void)
+{
+	/*
+	 * Caller list derived from the v2.02-5b71f8 Image (46 BL sites to
+	 * inode_permission @ 0xffffffc010251480).  Every caller that exists
+	 * in this profile is REQUIRED: a missed caller is a coverage hole
+	 * NoMount cannot detect at runtime, so the family fails closed and
+	 * the kretprobe fallback stays live.  OPTIONAL entries cover callers
+	 * whose absence is structural (config-off), not a shape drift.
+	 */
+	static const struct ksu_bl_manifest_caller callers[] = {
+		/* prctl(PR_SET_MM) argv/envp area checks. */
+		{ "prctl_set_mm", KSU_BL_SITE_REQUIRED, 1 },
+		/* cgroup task migration permission re-check. */
+		{ "cgroup_procs_write_permission", KSU_BL_SITE_REQUIRED, 1 },
+		/* bpf pinned-object access. */
+		{ "bpf_obj_get_user", KSU_BL_SITE_REQUIRED, 1 },
+		{ "bpf_prog_get_type_path", KSU_BL_SITE_REQUIRED, 1 },
+		/* mm: mincore/madvise maps permission to file read/write. */
+		{ "__arm64_sys_mincore", KSU_BL_SITE_REQUIRED, 1 },
+		{ "do_madvise", KSU_BL_SITE_REQUIRED, 1 },
+		{ "madvise_cold_or_pageout_pte_range", KSU_BL_SITE_REQUIRED, 1 },
+		/* truncate/chdir/chroot/faccessat core legs. */
+		{ "vfs_truncate", KSU_BL_SITE_REQUIRED, 1 },
+		{ "do_faccessat", KSU_BL_SITE_REQUIRED, 2 },
+		{ "ksys_chdir", KSU_BL_SITE_REQUIRED, 2 },
+		{ "__arm64_sys_fchdir", KSU_BL_SITE_REQUIRED, 1 },
+		{ "ksys_chroot", KSU_BL_SITE_REQUIRED, 2 },
+		/* dedupe/clone range cross-file permission check. */
+		{ "vfs_dedupe_file_range_one", KSU_BL_SITE_REQUIRED, 1 },
+		/* exec: binfmt creds and dumpability.  flush_old_exec's
+		 * inode_permission site sits +0x520 in (next symbol +0x870),
+		 * past the default 0x400 window. */
+		{ "flush_old_exec", KSU_BL_SITE_REQUIRED, 1, 0x600 },
+		{ "would_dump", KSU_BL_SITE_REQUIRED, 1 },
+		{ "prepare_binprm", KSU_BL_SITE_REQUIRED, 1 },
+		/* path walk + creation family. */
+		{ "lookup_one_len_common", KSU_BL_SITE_REQUIRED, 1 },
+		{ "vfs_create", KSU_BL_SITE_REQUIRED, 1 },
+		{ "vfs_mkobj", KSU_BL_SITE_REQUIRED, 1 },
+		{ "vfs_tmpfile", KSU_BL_SITE_REQUIRED, 1 },
+		{ "path_openat", KSU_BL_SITE_REQUIRED, 1 },
+		{ "vfs_mknod", KSU_BL_SITE_REQUIRED, 1 },
+		{ "vfs_mkdir", KSU_BL_SITE_REQUIRED, 1 },
+		{ "may_delete", KSU_BL_SITE_REQUIRED, 1 },
+		{ "vfs_symlink", KSU_BL_SITE_REQUIRED, 1 },
+		{ "vfs_link", KSU_BL_SITE_REQUIRED, 1 },
+		{ "do_linkat", KSU_BL_SITE_REQUIRED, 1 },
+		{ "vfs_rename", KSU_BL_SITE_REQUIRED, 3 },
+		{ "vfs_whiteout", KSU_BL_SITE_REQUIRED, 1 },
+		{ "link_path_walk", KSU_BL_SITE_REQUIRED, 2 },
+		{ "may_open", KSU_BL_SITE_REQUIRED, 1 },
+		/* truncate-time recheck (notify_change), xattrs. */
+		{ "notify_change", KSU_BL_SITE_REQUIRED, 1 },
+		{ "xattr_permission", KSU_BL_SITE_REQUIRED, 1 },
+		/* misc VFS consumers. */
+		{ "__arm64_sys_inotify_add_watch", KSU_BL_SITE_REQUIRED, 1 },
+		{ "fsverity_ioctl_enable", KSU_BL_SITE_OPTIONAL, 1 },
+		{ "configfs_symlink", KSU_BL_SITE_OPTIONAL, 1 },
+		/* fs-type specific permission methods that call
+		 * inode_permission() on a second (real) inode. */
+		{ "fuse_open_backing", KSU_BL_SITE_OPTIONAL, 1 },
+		{ "fuse_access_backing", KSU_BL_SITE_OPTIONAL, 1 },
+		{ "ovl_permission", KSU_BL_SITE_REQUIRED, 1 },
+		/* AF_UNIX connect() autoconnect on abstract paths. */
+		{ "unix_find_other", KSU_BL_SITE_OPTIONAL, 1 },
+	};
+	unsigned long target = ksu_bl_lookup("inode_permission");
+	unsigned int found = 0;
+	unsigned int patched = 0;
+	bool ready;
+	int count;
+
+	WRITE_ONCE(inode_permission_fn,
+		   (void *)ksu_bl_lookup_canonical("inode_permission"));
+	count = ksu_bl_record_patch_manifest(
+		"permission/inode_permission", callers, ARRAY_SIZE(callers),
+		target, (unsigned long)ksu_do_inode_permission, &found,
+		&patched);
+	pr_info("branch_link: permission profile=%s family=%u/%u sites=%d\n",
+		"lisa-5.4", patched, found, count);
+	ready = target && count > 0 && found == patched;
+	/* On family failure the manifest restores every patched site, so the
+	 * wrapper is unreachable and NULLing the fn slot is safe.  If the
+	 * restore itself failed, patched sites may still branch here with a
+	 * dead fn -> -EOPNOTSUPP, which every VFS caller treats as a
+	 * permission DENIAL (system-wide).  Keep the slot bound while any
+	 * record could not be restored: a live site then delegates to the
+	 * original function -- pristine semantics -- instead of denying
+	 * everything. */
+	if (!ready) {
+		bool all_restored = true;
+		int i;
+
+		for (i = 0; i < ksu_bl_record_count; i++) {
+			if (ksu_bl_records[i].state == KSU_BL_RECORD_ACTIVE) {
+				all_restored = false;
+				break;
+			}
+		}
+		if (all_restored)
+			WRITE_ONCE(inode_permission_fn, NULL);
+		else
+			pr_warn("branch_link: permission family failed with "
+				"unrestorable sites; wrapper stays bound to "
+				"original\n");
+	}
+	return ready;
+}
+
+/*
+ * d_path family: replaces the d_path kretprobe.  Every compiled BL site to
+ * d_path() in the image is branch-rewritten to a wrapper that runs the
+ * original path formatting first and then, under the same task-level gates
+ * the kretprobe entry handler applied, substitutes a spoofed tail pointer
+ * from the NoMount rule tables or the SUSFS open_redirect mapping.
+ *
+ * The kretprobe skipped interception entirely when
+ * ksu_nomount_bypass_active() held or when neither NoMount nor
+ * open_redirect was active for the current task; KSU-internal d_path
+ * callers rely on that skip (they wrap their calls in bypass guards).
+ * The wrapper reproduces the gates before touching policy so internal
+ * callers see an unmodified result exactly as before.  Both policy
+ * helpers are allocation-free and never call d_path() themselves, so
+ * no recursion is possible through a patched site.
+ *
+ * The gates are task-scoped, not site-scoped, so KSU-internal sites
+ * are patched too: the kretprobe fired on them identically (it is
+ * symbol-based, not caller-based), and skipping them here would be a
+ * coverage change, not a preservation.
+ */
+static char *(*d_path_fn)(const struct path *, char *, int);
+
+static char *__nocfi ksu_do_dpath(const struct path *path, char *buf,
+				  int buflen)
+{
+	char *(*orig_d_path)(const struct path *, char *, int);
+	char *ret;
+	char *spoofed;
+
+	orig_d_path = READ_ONCE(d_path_fn);
+	if (unlikely(!orig_d_path))
+		return ERR_PTR(-EOPNOTSUPP);
+	ret = orig_d_path(path, buf, buflen);
+	if (ksu_nomount_bypass_active())
+		return ret;
+	if (!ksu_nomount_active_for_current() &&
+	    !ksu_susfs_open_redirect_active())
+		return ret;
+	spoofed = ksu_nomount_handle_dpath(path, buf, buflen, ret);
+	if (!spoofed)
+		spoofed = ksu_susfs_open_redirect_dpath(path, buf, buflen);
+	return spoofed ? spoofed : ret;
+}
+
+static bool ksu_branch_link_patch_dpath_family(void)
+{
+	/*
+	 * Caller list derived from the v2.02-test6 Image (20 BL sites to
+	 * d_path @ 0xffffffc010287300, 19 unique callers).  Ownership is by
+	 * the kallsyms region containing each site: the weak KSU path_mount
+	 * shim owns the site that nearest-t attribution mislabels as
+	 * ksu_kernel_write_compat.  The kretprobe was symbol-based and fired
+	 * on every site, so all sites are REQUIRED: omitting one would be a
+	 * coverage change.  A missed caller fails the family closed and the
+	 * kretprobe stays live.
+	 */
+	static const struct ksu_bl_manifest_caller callers[] = {
+		/* eBPF helper bpf_d_path(). */
+		{ "bpf_d_path", KSU_BL_SITE_REQUIRED, 1 },
+		/* /proc/<pid>/maps [stack] annotation. */
+		{ "linker_ctx", KSU_BL_SITE_REQUIRED, 1 },
+		/* file_path() wrapper: generic file->path consumer. */
+		{ "file_path", KSU_BL_SITE_REQUIRED, 1 },
+		/* tracing walk tracepoint formatter. */
+		{ "success_walk_trace", KSU_BL_SITE_REQUIRED, 1 },
+		/* mount expiry warning. */
+		{ "mnt_warn_timestamp_expiry", KSU_BL_SITE_REQUIRED, 1 },
+		/* seq_file /proc formatters (mounts, mountinfo). */
+		{ "seq_path", KSU_BL_SITE_REQUIRED, 1 },
+		/* readlink(2) on /proc/<pid>/{fd,cwd,root,exe}. */
+		{ "proc_pid_readlink", KSU_BL_SITE_REQUIRED, 1 },
+		/* ext4 fs-verity/OpenWith path logging. */
+		{ "ext4_file_open", KSU_BL_SITE_REQUIRED, 1 },
+		/* KSU weak path_mount shim (owns the d_path site mislabeled
+		 * as ksu_kernel_write_compat by nearest-t attribution). */
+		{ "path_mount", KSU_BL_SITE_REQUIRED, 1 },
+		/* KSU anon-inode d_dname wrapper. */
+		{ "ksu_wrapper_d_dname", KSU_BL_SITE_REQUIRED, 1 },
+		/* KSU mount-namespace setns path logging. */
+		{ "ksu_mnt_ns_setns_task", KSU_BL_SITE_REQUIRED, 1 },
+		/* KSU rc-once hook path logging. */
+		{ "ksu_install_rc_hook", KSU_BL_SITE_REQUIRED, 1 },
+		{ "ksu_sys_fstat", KSU_BL_SITE_REQUIRED, 1 },
+		{ "ksu_susfs_fdinfo_show", KSU_BL_SITE_REQUIRED, 1 },
+		{ "ksu_nomount_build_path_from_dfd", KSU_BL_SITE_REQUIRED, 2 },
+		{ "ksu_nomount_handle_fd_getattr", KSU_BL_SITE_REQUIRED, 1 },
+		{ "ksu_nomount_handle_statfs_path", KSU_BL_SITE_REQUIRED, 1 },
+		{ "ksu_nomount_collect_ancestors", KSU_BL_SITE_REQUIRED, 1 },
+		/* trace seq_buf path formatter. */
+		{ "seq_buf_path", KSU_BL_SITE_REQUIRED, 1 },
+	};
+	unsigned long target = ksu_bl_lookup("d_path");
+	unsigned int found = 0;
+	unsigned int patched = 0;
+	bool ready;
+	int count;
+
+	WRITE_ONCE(d_path_fn, (void *)ksu_bl_lookup_canonical("d_path"));
+	count = ksu_bl_record_patch_manifest(
+		"dpath/d_path", callers, ARRAY_SIZE(callers), target,
+		(unsigned long)ksu_do_dpath, &found, &patched);
+	pr_info("branch_link: dpath profile=%s family=%u/%u sites=%d\n",
+		"lisa-5.4", patched, found, count);
+	ready = target && count > 0 && found == patched;
+	if (!ready)
+		WRITE_ONCE(d_path_fn, NULL);
+	return ready;
+}
+
+static void ksu_branch_link_dpath_retire_probe(void)
+{
+	ksu_nomount_dpath_kretprobe_retire();
+}
+
+/*
+ * getname_flags / getname_kernel / iterate_dir families: replace the three
+ * PC-redirect kprobes.  The kprobes fire at function entry and move the
+ * instruction pointer to complete KSU reimplementations
+ * (ksu_nomount_getname_flags / _getname_kernel / _iterate_dir) -- the
+ * original body never runs.  The hookless equivalent is therefore NOT a
+ * call-then-override wrapper: every compiled BL call site to the target is
+ * branch-rewritten to call the replacement directly, with identical
+ * arguments and return conventions.  A call site invoking the replacement
+ * is exactly what the PC redirect produced (entry PC moved with registers
+ * intact), so per-site coverage parity with the kprobe is achieved by
+ * enumerating every site.  None of the three targets is an ops callback or
+ * exported to modules in a way that creates indirect dispatch (no modules
+ * are loadable on this build), so the BL census is the complete caller set.
+ *
+ * The replacements never call the patched symbols themselves
+ * (handle_getname / handle_iterate_dir delegate to f_op->iterate via
+ * function pointer), so no recursion through patched sites is possible.
+ */
+static bool ksu_branch_link_patch_getname_flags_family(void)
+{
+	/* 22 BL sites in the shipped image, across syscall wrappers and
+	 * kern_path/user_path helpers.  All REQUIRED: a missed site is a
+	 * path-policy bypass hole. */
+	static const struct ksu_bl_manifest_caller callers[] = {
+		{ "__arm64_sys_execveat", KSU_BL_SITE_REQUIRED, 1 },
+		{ "__arm64_compat_sys_execveat", KSU_BL_SITE_REQUIRED, 1 },
+		{ "getname", KSU_BL_SITE_REQUIRED, 1 },
+		{ "user_path_at_empty", KSU_BL_SITE_REQUIRED, 1 },
+		{ "user_path_create", KSU_BL_SITE_REQUIRED, 1 },
+		{ "do_mknodat", KSU_BL_SITE_REQUIRED, 2 },
+		{ "do_mkdirat", KSU_BL_SITE_REQUIRED, 2 },
+		{ "do_rmdir", KSU_BL_SITE_REQUIRED, 1 },
+		{ "__arm64_sys_unlinkat", KSU_BL_SITE_REQUIRED, 1 },
+		{ "__arm64_sys_unlink", KSU_BL_SITE_REQUIRED, 1 },
+		{ "do_symlinkat", KSU_BL_SITE_REQUIRED, 3 },
+		{ "do_linkat", KSU_BL_SITE_REQUIRED, 4 },
+		{ "do_renameat2", KSU_BL_SITE_REQUIRED, 2 },
+		{ "__arm64_sys_fsconfig", KSU_BL_SITE_REQUIRED, 1 },
+	};
+	unsigned long target = ksu_bl_lookup("getname_flags");
+	unsigned int found = 0;
+	unsigned int patched = 0;
+	bool ready;
+	int count;
+
+	count = ksu_bl_record_patch_manifest(
+		"getname/getname_flags", callers, ARRAY_SIZE(callers),
+		target, (unsigned long)ksu_nomount_getname_flags, &found,
+		&patched);
+	pr_info("branch_link: getname_flags profile=%s family=%u/%u sites=%d\n",
+		"lisa-5.4", patched, found, count);
+	ready = target && count > 0 && found == patched;
+	return ready;
+}
+
+static bool ksu_branch_link_patch_getname_kernel_family(void)
+{
+	/* 15 BL sites: kernel-internal pathname acquisition plus the KSU
+	 * callers that legitimately flowed through the kprobe too (the
+	 * probe was symbol-scoped, not caller-scoped). */
+	static const struct ksu_bl_manifest_caller callers[] = {
+		{ "run_init_process", KSU_BL_SITE_REQUIRED, 1 },
+		{ "call_usermodehelper_exec_async", KSU_BL_SITE_REQUIRED, 1 },
+		{ "filp_open", KSU_BL_SITE_REQUIRED, 1 },
+		{ "do_sys_open", KSU_BL_SITE_REQUIRED, 1 },
+		{ "open_exec", KSU_BL_SITE_REQUIRED, 1 },
+		{ "kern_path_locked", KSU_BL_SITE_REQUIRED, 1 },
+		{ "kern_path", KSU_BL_SITE_REQUIRED, 1 },
+		{ "vfs_path_lookup", KSU_BL_SITE_REQUIRED, 1 },
+		{ "do_file_open_root", KSU_BL_SITE_REQUIRED, 1 },
+		{ "kern_path_create", KSU_BL_SITE_REQUIRED, 1 },
+		{ "fs_lookup_param", KSU_BL_SITE_REQUIRED, 1 },
+		{ "ksu_nomount_rebase_execve_filename", KSU_BL_SITE_REQUIRED,
+		  1 },
+		{ "ksu_do_filp_open", KSU_BL_SITE_REQUIRED, 2 },
+		{ "ksu_susfs_open_redirect_getname", KSU_BL_SITE_REQUIRED, 1 },
+	};
+	unsigned long target = ksu_bl_lookup("getname_kernel");
+	unsigned int found = 0;
+	unsigned int patched = 0;
+	bool ready;
+	int count;
+
+	count = ksu_bl_record_patch_manifest(
+		"getname/getname_kernel", callers, ARRAY_SIZE(callers),
+		target, (unsigned long)ksu_nomount_getname_kernel, &found,
+		&patched);
+	pr_info("branch_link: getname_kernel profile=%s family=%u/%u sites=%d\n",
+		"lisa-5.4", patched, found, count);
+	ready = target && count > 0 && found == patched;
+	return ready;
+}
+
+static bool ksu_branch_link_patch_iterate_dir_family(void)
+{
+	/* 10 BL sites.  ovl_iterate's second site sits +0x478 in (next
+	 * symbol +0x6b0), past the default 0x400 window. */
+	static const struct ksu_bl_manifest_caller callers[] = {
+		{ "__arm64_sys_getdents", KSU_BL_SITE_REQUIRED, 1 },
+		{ "ksys_getdents64", KSU_BL_SITE_REQUIRED, 1 },
+		{ "__arm64_compat_sys_getdents", KSU_BL_SITE_REQUIRED, 1 },
+		{ "exportfs_get_name", KSU_BL_SITE_REQUIRED, 1 },
+		{ "fuse_readdir_backing", KSU_BL_SITE_REQUIRED, 1 },
+		{ "ovl_dir_read", KSU_BL_SITE_REQUIRED, 1 },
+		{ "ovl_iterate", KSU_BL_SITE_REQUIRED, 2, 0x600 },
+		{ "iterate_incfs_dir", KSU_BL_SITE_REQUIRED, 1 },
+		{ "search_manager", KSU_BL_SITE_REQUIRED, 1 },
+	};
+	unsigned long target = ksu_bl_lookup("iterate_dir");
+	unsigned int found = 0;
+	unsigned int patched = 0;
+	bool ready;
+	int count;
+
+	count = ksu_bl_record_patch_manifest(
+		"iterate/iterate_dir", callers, ARRAY_SIZE(callers), target,
+		(unsigned long)ksu_nomount_iterate_dir, &found, &patched);
+	pr_info("branch_link: iterate_dir profile=%s family=%u/%u sites=%d\n",
+		"lisa-5.4", patched, found, count);
+	ready = target && count > 0 && found == patched;
+	return ready;
+}
+
+static void ksu_branch_link_getname_iterate_retire_probes(bool flags_ready,
+							  bool kernel_ready,
+							  bool iterate_ready)
+{
+	/* Retirement is all-or-nothing per family: each replacement family
+	 * fully reproduces its probe's behavior only when its manifest
+	 * commits; a mixed state (some call sites patched, probe gone)
+	 * would be a coverage hole.  All three families commit before any
+	 * probe is retired, and any earlier family failure has already
+	 * rolled its patches back under the same lock. */
+	if (flags_ready && kernel_ready && iterate_ready)
+		ksu_nomount_redirect_kprobes_retire();
+}
+#endif /* CONFIG_KSU_HOOKLESS_NOMOUNT */
 
 /*
  * Manifest variant for routes whose REQUIRED callers may dispatch to one of
@@ -703,14 +1133,14 @@ static long __nocfi ksu_do_faccessat(int dfd, const char __user *filename,
 {
 	const struct cred *old_cred = NULL;
 	long ret;
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	struct ksu_nomount_lookup_scope lookup_scope;
 #endif
 
 	if (unlikely(ksu_su_compat_enabled && ksu_bl_user_path_is_su(filename)))
 		old_cred = ksu_handle_faccessat_su_path(&dfd, &filename,
 							&mode, &flags);
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	ksu_nomount_lookup_scope_enter(&lookup_scope, dfd);
 #endif
 	{
@@ -729,14 +1159,14 @@ static long __nocfi ksu_do_faccessat(int dfd, const char __user *filename,
 			READ_ONCE(do_faccessat_fn);
 
 		if (unlikely(!fn)) {
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 			ksu_nomount_lookup_scope_exit(&lookup_scope);
 #endif
 			return -EOPNOTSUPP;
 		}
 		ret = fn(dfd, filename, mode, flags);
 	}
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	ksu_nomount_lookup_scope_exit(&lookup_scope);
 #endif
 	if (old_cred)
@@ -750,14 +1180,14 @@ static long __nocfi ksu_do_faccessat(int dfd, const char __user *filename,
 {
 	const struct cred *old_cred = NULL;
 	long ret;
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	struct ksu_nomount_lookup_scope lookup_scope;
 #endif
 
 	if (unlikely(ksu_su_compat_enabled && ksu_bl_user_path_is_su(filename)))
 		old_cred = ksu_handle_faccessat_su_path(&dfd, &filename,
 							&mode, NULL);
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	ksu_nomount_lookup_scope_enter(&lookup_scope, dfd);
 #endif
 	{
@@ -765,14 +1195,14 @@ static long __nocfi ksu_do_faccessat(int dfd, const char __user *filename,
 			READ_ONCE(do_faccessat_fn);
 
 		if (unlikely(!fn)) {
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 			ksu_nomount_lookup_scope_exit(&lookup_scope);
 #endif
 			return -EOPNOTSUPP;
 		}
 		ret = fn(dfd, filename, mode);
 	}
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	ksu_nomount_lookup_scope_exit(&lookup_scope);
 #endif
 	if (old_cred)
@@ -787,8 +1217,14 @@ static bool ksu_branch_link_patch_faccessat_family(void)
 		/* Native faccessat is present in every supported profile. */
 		{ "__arm64_sys_faccessat", KSU_BL_SITE_REQUIRED, 1 },
 #ifdef CONFIG_COMPAT
-		/* Standard ARM64 compat access(2) uses this generated wrapper. */
-		{ "__arm64_sys_access", KSU_BL_SITE_REQUIRED, 1 },
+		/* access(2) wrapper.  The two wrappers are adjacent tiny
+		 * functions; when the scanner's next-symbol bound is wider
+		 * than their spacing the faccessat pass already patches the
+		 * access site, leaving nothing for this entry (harmless --
+		 * the site IS covered).  Treat it as OPTIONAL so that exact
+		 * enumeration and scanner-overrun both yield a committed,
+		 * fully-covered family. */
+		{ "__arm64_sys_access", KSU_BL_SITE_OPTIONAL, 1 },
 #endif
 #ifdef __NR_faccessat2
 		/* Require faccessat2 only when this target exposes the syscall. */
@@ -819,7 +1255,7 @@ static bool ksu_branch_link_patch_faccessat_family(void)
 	return ready;
 }
 
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 static int (*do_readlinkat_fn)(int dfd, const char __user *pathname,
 				char __user *buf, int bufsiz);
 
@@ -844,13 +1280,11 @@ static bool ksu_branch_link_patch_readlink_family(void)
 	static const struct ksu_bl_manifest_caller callers[] = {
 		/* Native ARM64 exposes readlinkat, not a separate readlink syscall. */
 		{ "__arm64_sys_readlinkat", KSU_BL_SITE_REQUIRED, 1 },
-#ifdef CONFIG_COMPAT
-		/* Compat readlink uses the generated native-looking wrapper. */
-		{ "__arm64_sys_readlink", KSU_BL_SITE_REQUIRED, 1 },
-#else
-		{ "__arm64_sys_readlink", KSU_BL_SITE_OPTIONAL, 1 },
-#endif
 #if defined(CONFIG_COMPAT)
+		/* Compat readlink wrapper: adjacent to readlinkat; the
+		 * scanner-overrun/optional reasoning mirrors the faccessat
+		 * family above. */
+		{ "__arm64_sys_readlink", KSU_BL_SITE_OPTIONAL, 1 },
 		/* Vendor-specific compat wrappers are outside this profile. */
 		{ "__arm64_compat_sys_readlinkat", KSU_BL_SITE_UNSUPPORTED, 0 },
 		{ "__arm64_compat_sys_readlink", KSU_BL_SITE_UNSUPPORTED, 0 },
@@ -877,7 +1311,7 @@ static bool ksu_branch_link_patch_readlink_family(void)
 
 static void ksu_bl_handle_stat_result(struct kstat *stat, int ret)
 {
-#ifdef CONFIG_KSU_KPROBES_SUSFS
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
 	ksu_susfs_handle_stat_result(stat, ret);
 #else
 	(void)stat;
@@ -893,17 +1327,17 @@ static int __nocfi ksu_vfs_fstatat(int dfd, const char __user *filename,
 {
 	const struct cred *old_cred = NULL;
 	int ret;
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	struct ksu_nomount_lookup_scope lookup_scope;
 #endif
 
 	if (unlikely(ksu_su_compat_enabled && ksu_bl_user_path_is_su(filename)))
 		old_cred = ksu_handle_stat_su_path(&dfd, &filename, &flags);
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	ksu_nomount_lookup_scope_enter(&lookup_scope, dfd);
 #endif
 	ret = vfs_fstatat_fn(dfd, filename, stat, flags);
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	ksu_nomount_lookup_scope_exit(&lookup_scope);
 #endif
 	if (old_cred)
@@ -913,7 +1347,7 @@ static int __nocfi ksu_vfs_fstatat(int dfd, const char __user *filename,
 }
 #endif
 
-#if defined(CONFIG_KSU_KPROBES_NOMOUNT) && \
+#if defined(CONFIG_KSU_HOOKLESS_NOMOUNT) && \
 	LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
 /*
  * Android 6.1 LTO can inline vfs_fstatat() into newfstatat(), leaving the
@@ -982,7 +1416,7 @@ static int __nocfi ksu_vfs_statx(int dfd, struct filename *filename,
 
 	if (filename && !IS_ERR(filename))
 		ksu_handle_stat_kernel_filename((char *)filename->name);
-#if defined(CONFIG_KSU_KPROBES_NOMOUNT) && \
+#if defined(CONFIG_KSU_HOOKLESS_NOMOUNT) && \
 	LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
 	rebased = ksu_nomount_rebase_statx_filename(dfd, filename);
 	if (IS_ERR(rebased)) {
@@ -994,7 +1428,7 @@ static int __nocfi ksu_vfs_statx(int dfd, struct filename *filename,
 		lookup_name = rebased;
 #endif
 	ret = vfs_statx_fn(dfd, lookup_name, flags, stat, request_mask);
-#if defined(CONFIG_KSU_KPROBES_NOMOUNT) && \
+#if defined(CONFIG_KSU_HOOKLESS_NOMOUNT) && \
 	LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
 	if (rebased)
 		putname(rebased);
@@ -1011,17 +1445,17 @@ static int __nocfi ksu_vfs_statx(int dfd, const char __user *filename,
 {
 	const struct cred *old_cred = NULL;
 	int ret;
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	struct ksu_nomount_lookup_scope lookup_scope;
 #endif
 
 	if (unlikely(ksu_su_compat_enabled && ksu_bl_user_path_is_su(filename)))
 		old_cred = ksu_handle_stat_su_path(&dfd, &filename, &flags);
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	ksu_nomount_lookup_scope_enter(&lookup_scope, dfd);
 #endif
 	ret = vfs_statx_fn(dfd, filename, flags, stat, request_mask);
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	ksu_nomount_lookup_scope_exit(&lookup_scope);
 #endif
 	if (old_cred)
@@ -1067,7 +1501,7 @@ static int ksu_bl_patch_exec_route(
 	return last_error;
 }
 
-#ifdef CONFIG_KSU_KPROBES_SUSFS
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
 static int (*vfs_getattr_nosec_fn)(const struct path *path, struct kstat *stat,
 				   u32 request_mask, unsigned int query_flags);
 
@@ -1102,7 +1536,7 @@ static int __nocfi ksu_vfs_getattr_nosec_fd(const struct path *path,
 					  query_flags);
 
 	ksu_susfs_handle_vfs_getattr_nosec(path, stat, ret);
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	/* Direct fstat callers retain the resolved path, so descendants of a
 	 * redirected directory can restore the visible device as well. */
 	ksu_nomount_handle_fd_getattr(ret, path, stat);
@@ -1120,7 +1554,7 @@ static int __nocfi ksu_vfs_fstat(unsigned int fd, struct kstat *stat)
 	 * getattr through an indirect inode-operation call.  There is therefore no
 	 * vfs_getattr_nosec branch for the old fd-stat patch to replace. */
 	ksu_bl_handle_stat_result(stat, ret);
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	if (!ret && ksu_nomount_active_for_current()) {
 		struct fd f = fdget_raw(fd);
 
@@ -1134,7 +1568,7 @@ static int __nocfi ksu_vfs_fstat(unsigned int fd, struct kstat *stat)
 }
 #endif
 
-#ifdef CONFIG_KSU_KPROBES_SUSFS
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
 static int (*vfs_statfs_fn)(const struct path *path, struct kstatfs *statfs);
 
 static void ksu_handle_statfs_result(const struct path *path,
@@ -1148,7 +1582,7 @@ static void ksu_handle_statfs_result(const struct path *path,
 	if (!inode)
 		return;
 	ksu_susfs_open_redirect_apply_statfs(inode, statfs);
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	ksu_nomount_handle_statfs_path(ret, path, statfs);
 #endif
 }
@@ -1236,7 +1670,7 @@ static bool ksu_branch_link_patch_stat_path_family(void)
 
 static bool ksu_branch_link_patch_stat_fd_family(void)
 {
-#ifdef CONFIG_KSU_KPROBES_SUSFS
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
 	/*
 	 * fd-stat metadata is best-effort enrichment.  On legacy non-LTO
 	 * images the fstat wrappers inline vfs_fstat()/vfs_statx_fd() and BL
@@ -1291,7 +1725,7 @@ static bool ksu_branch_link_patch_stat_fd_family(void)
 #endif
 }
 
-#ifdef CONFIG_KSU_KPROBES_SUSFS
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
 static bool ksu_branch_link_patch_statfs_family(void)
 {
 	static const struct ksu_bl_manifest_caller user_statfs_callers[] = {
@@ -1361,7 +1795,7 @@ static bool ksu_branch_link_patch_statfs_family(void)
 }
 #endif
 
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 static int ksu_nomount_rebase_execve_filename(
 	int fd, struct filename **filename_ptr)
 {
@@ -1402,7 +1836,7 @@ static int __nocfi ksu_do_execveat_common(int fd, struct filename *filename,
 {
 	int ret;
 
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	ret = ksu_nomount_rebase_execve_filename(fd, &filename);
 	if (ret)
 		return ret;
@@ -1422,7 +1856,7 @@ static int __nocfi ksu_do_execve_file(int fd, struct filename *filename,
 {
 	int ret;
 
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	ret = ksu_nomount_rebase_execve_filename(fd, &filename);
 	if (ret)
 		return ret;
@@ -1460,7 +1894,7 @@ static int __nocfi ksu_do_execveat(int fd, struct filename *filename,
 	struct user_arg_ptr envp = { .ptr.native = __envp };
 	int ret;
 
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	ret = ksu_nomount_rebase_execve_filename(fd, &filename);
 	if (ret)
 		return ret;
@@ -1500,7 +1934,7 @@ static int __nocfi ksu_compat_do_execveat(
 	struct user_arg_ptr envp = { .is_compat = true, .ptr.compat = __envp };
 	int ret;
 
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	ret = ksu_nomount_rebase_execve_filename(fd, &filename);
 	if (ret)
 		return ret;
@@ -1512,8 +1946,8 @@ static int __nocfi ksu_compat_do_execveat(
 #endif
 #endif
 
-#ifdef CONFIG_KSU_KPROBES_SUSFS
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 static long (*do_sys_open_fn)(int dfd, const char __user *filename, int flags,
 			      umode_t mode);
 
@@ -1560,7 +1994,7 @@ ksu_do_filp_open(int dfd, struct filename *pathname,
 	/* getname() cannot see an arbitrary directory fd.  Rebuild a temporary
 	 * filename while the NoMount lookup scope supplies that fd, then retain the
 	 * caller-owned original filename for do_sys_open() to release. */
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	if (dfd != AT_FDCWD && pathname->name[0] && pathname->name[0] != '/' &&
 	    !ksu_nomount_lookup_scope_matches(dfd)) {
 		struct ksu_nomount_lookup_scope lookup_scope;
@@ -1698,8 +2132,6 @@ static bool ksu_branch_link_patch_susfs(void)
 		{ "delayed_mntput", KSU_BL_SITE_REQUIRED, 1 },
 		{ "mntput_no_expire", KSU_BL_SITE_REQUIRED, 1 },
 	};
-	unsigned long caller_addr;
-	unsigned long target_addr;
 	int create_count;
 	int clone_count;
 	int cleanup_count;
@@ -1709,7 +2141,7 @@ static bool ksu_branch_link_patch_susfs(void)
 	bool direct_getattr_ready;
 	int ret;
 
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	{
 		static const struct ksu_bl_manifest_caller
 			open_scope_callers[] = {
@@ -1797,14 +2229,45 @@ static bool ksu_branch_link_patch_susfs(void)
 		ksu_susfs_set_open_redirect_ready(open_ready);
 	}
 
-	caller_addr = ksu_bl_lookup("vfs_getattr");
-	target_addr = ksu_bl_lookup("vfs_getattr_nosec");
-	vfs_getattr_nosec_fn = (void *)ksu_bl_lookup_canonical("vfs_getattr_nosec");
-	ret = ksu_bl_record_patch_all("susfs/vfs_getattr_nosec", caller_addr,
-				      target_addr,
-				      (unsigned long)ksu_vfs_getattr_nosec);
-	pr_info("branch_link: susfs/vfs_getattr_nosec: %d\n", ret);
-	direct_getattr_ready = ret > 0;
+	/*
+	 * getattr-interior family: the only compiled BL site to
+	 * vfs_getattr_nosec in this image is inside exportfs_get_name()
+	 * (+0xb8).  This build inlines the nosec body into vfs_getattr()
+	 * (verified by disassembly: bl security_inode_getattr followed by
+	 * the inline kstat fill / blr i_op->getattr, with no bl to nosec),
+	 * so a manifest on vfs_getattr never resolves -- the interior route
+	 * must target the real caller.  The wrapper ksu_vfs_getattr_nosec
+	 * applies the fused SUSFS/NoMount metadata layer at the same
+	 * final-result point as the retired kretprobe.
+	 */
+	{
+		static const struct ksu_bl_manifest_caller
+			getattr_callers[] = {
+			{ "exportfs_get_name", KSU_BL_SITE_REQUIRED, 1 },
+		};
+		unsigned int getattr_found = 0;
+		unsigned int getattr_patched = 0;
+		int getattr_count;
+		unsigned long nosec_addr = ksu_bl_lookup("vfs_getattr_nosec");
+
+		vfs_getattr_nosec_fn =
+			(void *)ksu_bl_lookup_canonical("vfs_getattr_nosec");
+		getattr_count = ksu_bl_record_patch_manifest(
+			"susfs/vfs_getattr_nosec", getattr_callers,
+			ARRAY_SIZE(getattr_callers), nosec_addr,
+			(unsigned long)ksu_vfs_getattr_nosec, &getattr_found,
+			&getattr_patched);
+		if (getattr_count <= 0)
+			WRITE_ONCE(vfs_getattr_nosec_fn, NULL);
+		pr_info("branch_link: susfs/vfs_getattr_nosec required=%u/%u sites=%d\n",
+			getattr_patched, getattr_found, getattr_count);
+		direct_getattr_ready = nosec_addr && getattr_count > 0 &&
+			getattr_found == getattr_patched;
+	}
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
+	if (direct_getattr_ready)
+		ksu_nomount_getattr_kretprobe_retire();
+#endif
 
 	create_target = ksu_bl_lookup("vfs_create_mount");
 	vfs_create_mount_fn = (void *)ksu_bl_lookup_canonical("vfs_create_mount");
@@ -1914,6 +2377,11 @@ int ksu_branch_link_patch_init(void)
 	ksu_bl_state = KSU_BL_INSTALLING;
 	ksu_bl_faccessat_ready = false;
 	ksu_bl_readlink_ready = false;
+	ksu_bl_permission_ready = false;
+	ksu_bl_dpath_ready = false;
+	ksu_bl_getname_flags_ready = false;
+	ksu_bl_getname_kernel_ready = false;
+	ksu_bl_iterate_ready = false;
 	ksu_bl_stat_path_ready = false;
 	ksu_bl_stat_fd_ready = false;
 	ksu_bl_statfs_ready = false;
@@ -1923,8 +2391,58 @@ int ksu_branch_link_patch_init(void)
 	ksu_bl_faccessat_ready =
 		ksu_branch_link_patch_faccessat_family();
 
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	ksu_bl_readlink_ready = ksu_branch_link_patch_readlink_family();
+#endif
+
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
+	{
+		bool permission_ready =
+			ksu_branch_link_patch_permission_family();
+
+		ksu_bl_permission_ready = permission_ready;
+		/* Retire the permission kretprobe pair once every
+		 * inode_permission caller is branch-rewritten: the wrapper
+		 * reproduces the probe's force-allow at the same final-result
+		 * point.  On partial install the manifest rolled itself back,
+		 * the probes stay registered and keep the old semantics. */
+		if (permission_ready)
+			ksu_nomount_permission_kretprobes_retire();
+	}
+#endif
+
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
+	{
+		bool dpath_ready = ksu_branch_link_patch_dpath_family();
+
+		ksu_bl_dpath_ready = dpath_ready;
+		/* Same fail-closed contract as the permission family: retire
+		 * the d_path kretprobe only on a committed full install;
+		 * any manifest miss rolls the family back and leaves the
+		 * probe live. */
+		if (dpath_ready)
+			ksu_branch_link_dpath_retire_probe();
+	}
+#endif
+
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
+	{
+		bool flags_ready = ksu_branch_link_patch_getname_flags_family();
+		bool kernel_ready =
+			ksu_branch_link_patch_getname_kernel_family();
+		bool iterate_ready = ksu_branch_link_patch_iterate_dir_family();
+
+		ksu_bl_getname_flags_ready = flags_ready;
+		ksu_bl_getname_kernel_ready = kernel_ready;
+		ksu_bl_iterate_ready = iterate_ready;
+		/* All three replacement families must commit together before
+		 * the PC-redirect kprobes retire: the probes interlock (a
+		 * path that enters via an unpatched getname site must still
+		 * see iterate-dir hiding, and vice versa). */
+		ksu_branch_link_getname_iterate_retire_probes(flags_ready,
+							      kernel_ready,
+							      iterate_ready);
+	}
 #endif
 
 	stat_path_ready = ksu_branch_link_patch_stat_path_family();
@@ -2116,13 +2634,13 @@ int ksu_branch_link_patch_init(void)
 	ksu_bl_exec_ready = exec_ready;
 	}
 
-	#ifdef CONFIG_KSU_KPROBES_SUSFS
+	#ifdef CONFIG_KSU_HOOKLESS_SUSFS
 	{
 		bool direct_getattr_ready = ksu_branch_link_patch_susfs();
 		bool statfs_ready = ksu_branch_link_patch_statfs_family();
 		ksu_bl_statfs_ready = statfs_ready;
 
-	#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+	#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 		nomount_getattr_ready = ksu_nomount_getattr_runtime_ready();
 	#endif
 		/* kstat metadata spoofing is only honest to advertise when the
@@ -2154,12 +2672,16 @@ int ksu_branch_link_patch_init(void)
 	}
 	if (ksu_susfs_mntns_get_runtime_ready())
 		ksu_susfs_disable_mntns_probe_fallback();
-	pr_info("branch_link: readiness faccess=%d readlink=%d stat-path=%d "
-		"stat-fd=%d statfs=%d exec=%d mount=%d records=%d\n",
+	pr_info("branch_link: readiness faccess=%d readlink=%d permission=%d "
+		"dpath=%d gname-flags=%d gname-kernel=%d iterate=%d "
+		"stat-path=%d stat-fd=%d statfs=%d exec=%d mount=%d "
+		"records=%d\n",
 		ksu_bl_faccessat_ready, ksu_bl_readlink_ready,
-		ksu_bl_stat_path_ready, ksu_bl_stat_fd_ready,
-		ksu_bl_statfs_ready, ksu_bl_exec_ready, ksu_bl_mount_ready,
-		ksu_bl_record_count);
+		ksu_bl_permission_ready, ksu_bl_dpath_ready,
+		ksu_bl_getname_flags_ready, ksu_bl_getname_kernel_ready,
+		ksu_bl_iterate_ready, ksu_bl_stat_path_ready,
+		ksu_bl_stat_fd_ready, ksu_bl_statfs_ready, ksu_bl_exec_ready,
+		ksu_bl_mount_ready, ksu_bl_record_count);
 	ksu_bl_state = KSU_BL_ACTIVE;
 	mutex_unlock(&ksu_bl_lock);
 	return 0;
@@ -2167,12 +2689,17 @@ int ksu_branch_link_patch_init(void)
 install_failed:
 	ksu_bl_faccessat_ready = false;
 	ksu_bl_readlink_ready = false;
+	ksu_bl_permission_ready = false;
+	ksu_bl_dpath_ready = false;
+	ksu_bl_getname_flags_ready = false;
+	ksu_bl_getname_kernel_ready = false;
+	ksu_bl_iterate_ready = false;
 	ksu_bl_stat_path_ready = false;
 	ksu_bl_stat_fd_ready = false;
 	ksu_bl_statfs_ready = false;
 	ksu_bl_mount_ready = false;
 	ksu_bl_exec_ready = false;
-#ifdef CONFIG_KSU_KPROBES_SUSFS
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
 	ksu_susfs_set_open_redirect_ready(false);
 	ksu_susfs_set_getattr_ready(false);
 	ksu_susfs_set_mount_runtime_ready(false);
@@ -2204,13 +2731,18 @@ int ksu_branch_link_patch_exit(void)
 	}
 	ksu_bl_faccessat_ready = false;
 	ksu_bl_readlink_ready = false;
+	ksu_bl_permission_ready = false;
+	ksu_bl_dpath_ready = false;
+	ksu_bl_getname_flags_ready = false;
+	ksu_bl_getname_kernel_ready = false;
+	ksu_bl_iterate_ready = false;
 	ksu_bl_stat_path_ready = false;
 	ksu_bl_stat_fd_ready = false;
 	ksu_bl_statfs_ready = false;
 	ksu_bl_mount_ready = false;
 	ksu_bl_exec_ready = false;
 
-#ifdef CONFIG_KSU_KPROBES_SUSFS
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
 	ksu_susfs_set_open_redirect_ready(false);
 	ksu_susfs_set_getattr_ready(false);
 	ksu_susfs_set_mount_runtime_ready(false);

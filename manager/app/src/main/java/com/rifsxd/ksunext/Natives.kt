@@ -64,7 +64,11 @@ object Natives {
      * Get a string indicating the SU hook mode enabled in kernel.
      * The return values are:
      * - "Manual": Manual hooks was enabled.
-     * - "Kprobes": Kprobes hooks was enabled (CONFIG_KSU_KPROBES_HOOK).
+     * - "SyscallTable": syscall-table tamper hooks enabled.
+     * - "BranchLink": ARM64 branch-link call-site hooks enabled.
+     * - "SyscallTable+BranchLink": both mechanisms enabled.
+     * - "Tracepoint": sys_enter tracepoint dispatch (legacy non-TAMPER).
+     * - "Kprobes": legacy non-TAMPER fallback profile (requires kernel CONFIG_KPROBES).
      *
      * @return return hook mode, or null if unavailable.
      */

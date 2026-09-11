@@ -14,7 +14,9 @@
 #include <linux/jump_label.h>
 #include <linux/kernel.h>
 #include <linux/kdev_t.h>
+#ifdef CONFIG_KPROBES
 #include <linux/kprobes.h>
+#endif
 #include <linux/mempolicy.h>
 #include <linux/mm.h>
 #include <linux/mutex.h>
@@ -44,7 +46,7 @@
 #include "infra/symbol_resolver.h"
 #include "klog.h" // IWYU pragma: keep
 #include "ksu.h"
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 #include "nomount/nomount.h"
 #endif
 #include "policy/allowlist.h"
@@ -224,7 +226,9 @@ static DEFINE_MUTEX(ksu_susfs_sus_map_lock);
 static DEFINE_STATIC_KEY_FALSE(ksu_susfs_kstat_enabled);
 static DEFINE_STATIC_KEY_FALSE(ksu_susfs_sus_map_enabled);
 
+#ifdef CONFIG_KRETPROBES
 static struct kretprobe *ksu_susfs_vfs_getattr_nosec_rp;
+#endif
 #ifdef KSU_SUSFS_HAS_SMAPS_ROLLUP
 static int (*ksu_susfs_orig_pid_smaps_rollup_open)(struct inode *inode,
 						   struct file *file);
@@ -367,7 +371,7 @@ static bool ksu_susfs_proc_maps_view_enabled_current(void)
 		return true;
 	}
 
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	return ksu_nomount_active_for_current();
 #else
 	return false;
@@ -586,7 +590,7 @@ static bool ksu_susfs_kstat_vma_spoof(struct vm_area_struct *vma, dev_t *dev,
 		changed = true;
 
 	/* The virtual NoMount alias is the final identity exposed for its target. */
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	if (ksu_nomount_spoof_mmap_metadata(inode, dev, ino))
 		changed = true;
 #endif
@@ -636,6 +640,7 @@ static bool ksu_susfs_sus_map_match_file(struct file *file)
 	return ksu_susfs_sus_map_match_inode(file_inode(file));
 }
 
+#ifdef CONFIG_KRETPROBES
 static int ksu_susfs_kstat_vfs_getattr_entry(struct kretprobe_instance *ri,
 					     struct pt_regs *regs)
 {
@@ -646,6 +651,7 @@ static int ksu_susfs_kstat_vfs_getattr_entry(struct kretprobe_instance *ri,
 	ctx->stat = (struct kstat *)PT_REGS_PARM2(regs);
 	return 0;
 }
+#endif
 
 #ifdef CONFIG_KSU_HACK_ARM64_BRANCH_LINK
 void
@@ -674,7 +680,7 @@ ksu_susfs_handle_vfs_getattr_nosec(const struct path *path, struct kstat *stat,
 		rcu_read_unlock();
 	}
 	ksu_susfs_open_redirect_apply_kstat(inode, stat);
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	/* NoMount is the final visible identity layer. */
 	ksu_nomount_handle_getattr(ret, path, stat);
 #endif
@@ -708,7 +714,7 @@ void ksu_susfs_handle_stat_result(struct kstat *stat, long ret)
 			ksu_susfs_kstat_apply_spoof(entry, stat);
 		rcu_read_unlock();
 	}
-#ifdef CONFIG_KSU_KPROBES_NOMOUNT
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	ksu_nomount_handle_stat_result(ret, native_ino, native_dev, stat);
 #endif
 }
@@ -726,6 +732,7 @@ bool ksu_susfs_kstat_runtime_ready(void)
 }
 #endif
 
+#ifdef CONFIG_KRETPROBES
 static int ksu_susfs_kstat_vfs_getattr_handler(struct kretprobe_instance *ri,
 					       struct pt_regs *regs)
 {
@@ -737,6 +744,7 @@ static int ksu_susfs_kstat_vfs_getattr_handler(struct kretprobe_instance *ri,
 
 	return 0;
 }
+#endif
 
 static int ksu_susfs_patch_fop_open(const struct file_operations *fops,
 				    int (*new_open)(struct inode *,
@@ -2813,6 +2821,7 @@ static ssize_t ksu_susfs_mem_write(struct file *file, const char __user *buf,
 	return ksu_susfs_orig_mem_write(file, buf, count, ppos);
 }
 
+#ifdef CONFIG_KRETPROBES
 static struct kretprobe *ksu_susfs_init_kretprobe(
 	const char *name, kretprobe_handler_t entry_handler,
 	kretprobe_handler_t handler, size_t data_size)
@@ -2854,6 +2863,7 @@ static void ksu_susfs_destroy_kretprobe(struct kretprobe **rp_ptr)
 	kfree(rp);
 	*rp_ptr = NULL;
 }
+#endif /* CONFIG_KRETPROBES */
 
 static void ksu_susfs_kstat_clear_all(void)
 {
@@ -3206,7 +3216,7 @@ int ksu_susfs_kstat_init(void)
 	ksu_susfs_kstat_rule_count = 0;
 	ksu_susfs_sus_map_rule_count = 0;
 
-#ifdef CONFIG_KSU_HACK_ARM64_BRANCH_LINK
+#if defined(CONFIG_KSU_HACK_ARM64_BRANCH_LINK) || !defined(CONFIG_KRETPROBES)
 	ksu_susfs_getattr_ready = false;
 #else
 	ksu_susfs_vfs_getattr_nosec_rp = ksu_susfs_init_kretprobe(
@@ -3487,7 +3497,9 @@ void ksu_susfs_kstat_exit(void)
 	}
 	ksu_susfs_maps_seqops = NULL;
 
+#ifdef CONFIG_KRETPROBES
 	ksu_susfs_destroy_kretprobe(&ksu_susfs_vfs_getattr_nosec_rp);
+#endif
 	ksu_susfs_getattr_ready = false;
 	ksu_susfs_kstat_clear_all();
 	ksu_susfs_sus_map_clear_all();

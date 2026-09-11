@@ -42,8 +42,8 @@ check_file "$VMLINUX"
 
 printf '\nConfig checks\n'
 check_config_enabled CONFIG_KSU
-check_config_enabled CONFIG_KSU_KPROBES_HOOK
-check_config_enabled CONFIG_KSU_KPROBES_SUSFS
+check_config_enabled CONFIG_KSU_HOOK_CORE
+check_config_enabled CONFIG_KSU_HOOKLESS_SUSFS
 check_config_enabled CONFIG_KPROBES
 check_config_enabled CONFIG_KRETPROBES
 check_config_enabled CONFIG_HAVE_SYSCALL_TRACEPOINTS

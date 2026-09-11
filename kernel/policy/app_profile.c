@@ -201,7 +201,7 @@ int escape_with_root_profile(void)
 
     disable_seccomp();
 
-#if defined(CONFIG_KSU_KPROBES_HOOK) && \
+#if defined(CONFIG_KSU_HOOK_CORE) && \
 	!defined(CONFIG_KSU_TAMPER_SYSCALL_TABLE)
 	if (profile->flags & FLAG_KSU_NO_NEW_PRIVS) {
 		set_thread_flag(TIF_KSU_DISABLE_ESCAPE_WITH_ROOT);

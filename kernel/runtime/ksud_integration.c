@@ -23,8 +23,10 @@
 #else
 #include <linux/sched.h>
 #endif
-#ifdef CONFIG_KSU_KPROBES_HOOK
+#ifdef CONFIG_KSU_HOOK_CORE
+#ifdef CONFIG_KPROBES
 #include <linux/kprobes.h>
+#endif
 #endif
 #include <linux/printk.h>
 #include <linux/types.h>
@@ -67,7 +69,7 @@ static const char KERNEL_SU_RC[] =
 static void stop_init_rc_hook();
 static void stop_execve_hook();
 
-#ifdef CONFIG_KSU_KPROBES_HOOK
+#ifdef CONFIG_KSU_HOOK_CORE
 static struct work_struct stop_input_hook_work;
 static bool ksu_input_hook __read_mostly = true;
 static bool ksu_input_handler_registered;
@@ -470,7 +472,7 @@ void ksu_install_rc_hook(struct file *file)
 
 void ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr)
 {
-#ifndef CONFIG_KSU_KPROBES_HOOK
+#ifndef CONFIG_KSU_HOOK_CORE
     return; // not enabled
 #endif
     struct file *file = fget(fd);
@@ -534,7 +536,7 @@ bool ksu_is_safe_mode()
     return false;
 }
 
-#ifdef CONFIG_KSU_KPROBES_HOOK
+#ifdef CONFIG_KSU_HOOK_CORE
 void ksu_execve_hook_ksud(const struct pt_regs *regs)
 {
     const char __user **filename_user = (const char **)&PT_REGS_PARM1(regs);
@@ -899,7 +901,7 @@ void ksu_stop_input_hook_runtime(void)
 // ksud: module support
 void __init ksu_ksud_init()
 {
-#ifdef CONFIG_KSU_KPROBES_HOOK
+#ifdef CONFIG_KSU_HOOK_CORE
     int ret;
 
     ksu_syscall_table_hook(__NR_read, ksu_sys_read, &orig_sys_read);
@@ -917,7 +919,7 @@ void __init ksu_ksud_init()
 
 void __exit ksu_ksud_exit()
 {
-#ifdef CONFIG_KSU_KPROBES_HOOK
+#ifdef CONFIG_KSU_HOOK_CORE
 	cancel_work_sync(&stop_input_hook_work);
 	if (ksu_input_handler_registered) {
 		ksu_input_hook = false;

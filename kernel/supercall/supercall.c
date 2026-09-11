@@ -4,7 +4,9 @@
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/interrupt.h>
+#ifdef CONFIG_KPROBES
 #include <linux/kprobes.h>
+#endif
 #include <linux/pid.h>
 #include <linux/preempt.h>
 #include <linux/slab.h>
@@ -22,7 +24,7 @@
 #include "klog.h" // IWYU pragma: keep
 #include "manager/manager_identity.h"
 #include "selinux/selinux.h"
-#ifdef CONFIG_KSU_KPROBES_SUSFS
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
 #include "susfs/susfs.h"
 #endif
 
@@ -30,13 +32,13 @@
 
 uint32_t ksuver_override = 0;
 
-#ifdef CONFIG_KSU_KPROBES_HOOK
+#ifdef CONFIG_KSU_HOOK_CORE
 struct ksu_install_fd_tw {
     struct callback_head cb;
     int __user *outp;
 };
 
-#ifdef CONFIG_KSU_KPROBES_SUSFS
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
 struct ksu_susfs_tw {
     struct callback_head cb;
     unsigned int cmd;
@@ -52,7 +54,7 @@ static bool ksu_susfs_may_sleep_now(void)
 
 #endif
 
-#ifdef CONFIG_KSU_KPROBES_SUSFS
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
 static bool ksu_susfs_supercall_allowed(void)
 {
 	return current_uid().val == 0 || is_ksu_domain_fast();
@@ -100,7 +102,7 @@ int ksu_install_fd(void)
     return fd;
 }
 
-#ifdef CONFIG_KSU_KPROBES_HOOK
+#ifdef CONFIG_KSU_HOOK_CORE
 static void ksu_install_fd_tw_func(struct callback_head *cb)
 {
     struct ksu_install_fd_tw *tw = container_of(cb, struct ksu_install_fd_tw, cb);
@@ -115,7 +117,7 @@ static void ksu_install_fd_tw_func(struct callback_head *cb)
     kfree(tw);
 }
 
-#ifdef CONFIG_KSU_KPROBES_SUSFS
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
 static void ksu_susfs_tw_func(struct callback_head *cb)
 {
     struct ksu_susfs_tw *tw = container_of(cb, struct ksu_susfs_tw, cb);
@@ -194,11 +196,11 @@ int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd,
 		return 0;
 	}
 
-#ifdef CONFIG_KSU_KPROBES_SUSFS
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
 	if (magic2 == KSU_SUSFS_MAGIC) {
 		if (!ksu_susfs_supercall_allowed())
 			return 0;
-#ifdef CONFIG_KSU_KPROBES_HOOK
+#ifdef CONFIG_KSU_HOOK_CORE
 		ksu_susfs_handle_compat_safely(cmd, *arg, false);
 #else
 		ksu_susfs_handle_compat(cmd, *arg);
@@ -338,7 +340,7 @@ int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd,
 	return 0;
 }
 
-#if defined(CONFIG_KSU_KPROBES_HOOK) && \
+#if defined(CONFIG_KSU_HOOK_CORE) && \
 	!defined(CONFIG_KSU_TAMPER_SYSCALL_TABLE)
 static int reboot_handler_pre(struct kprobe *p, struct pt_regs *regs)
 {
@@ -366,7 +368,7 @@ static int reboot_handler_pre(struct kprobe *p, struct pt_regs *regs)
         }
     }
 
-#ifdef CONFIG_KSU_KPROBES_SUSFS
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
 	if (magic1 == KSU_INSTALL_MAGIC1 && magic2 == KSU_SUSFS_MAGIC) {
 		if (!ksu_susfs_supercall_allowed())
 			return 0;
@@ -514,7 +516,7 @@ void __init ksu_supercalls_init(void)
 {
     ksu_supercall_dump_commands();
 
-#if defined(CONFIG_KSU_KPROBES_HOOK) && \
+#if defined(CONFIG_KSU_HOOK_CORE) && \
 	!defined(CONFIG_KSU_TAMPER_SYSCALL_TABLE)
     int rc;
 
@@ -529,7 +531,7 @@ void __init ksu_supercalls_init(void)
 
 void __exit ksu_supercalls_exit(void)
 {
-#if defined(CONFIG_KSU_KPROBES_HOOK) && \
+#if defined(CONFIG_KSU_HOOK_CORE) && \
 	!defined(CONFIG_KSU_TAMPER_SYSCALL_TABLE)
     unregister_kprobe(&reboot_kp);
 #endif

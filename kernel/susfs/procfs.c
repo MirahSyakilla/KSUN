@@ -12,7 +12,9 @@
 #include <linux/jiffies.h>
 #include <linux/jump_label.h>
 #include <linux/kmod.h>
+#ifdef CONFIG_KPROBES
 #include <linux/kprobes.h>
+#endif
 #include <linux/mm.h>
 #include <linux/mnt_namespace.h>
 #include <linux/mutex.h>
@@ -136,10 +138,12 @@ static const struct file_operations *ksu_susfs_fdinfo_fops;
 #ifdef CONFIG_KSU_HACK_ARM64_BRANCH_LINK
 static struct ns_common *(*ksu_susfs_orig_mntns_get)(struct task_struct *task);
 #endif
+#if defined(CONFIG_KRETPROBES) || defined(CONFIG_KPROBES)
 static struct kretprobe *ksu_susfs_vfs_create_mount_rp;
 static struct kretprobe *ksu_susfs_clone_mnt_rp;
 static struct kretprobe *ksu_susfs_mntns_get_rp;
 static struct kprobe *ksu_susfs_cleanup_mnt_kp;
+#endif
 static DEFINE_MUTEX(ksu_susfs_cmdline_patch_lock);
 static bool ksu_susfs_cmdline_ready;
 #if KSU_SUSFS_CMDLINE_USE_PROC_SHOW_HOOK
@@ -1122,6 +1126,7 @@ bool ksu_susfs_mount_runtime_available(void)
 }
 #endif
 
+#ifdef CONFIG_KRETPROBES
 static int ksu_susfs_mntns_get_handler(struct kretprobe_instance *ri,
 					       struct pt_regs *regs)
 {
@@ -1133,6 +1138,7 @@ static int ksu_susfs_mntns_get_handler(struct kretprobe_instance *ri,
 		(struct ns_common *)regs_return_value(regs));
 	return 0;
 }
+#endif
 
 static int ksu_susfs_show_vfsmnt(struct seq_file *m, struct vfsmount *mnt)
 {
@@ -1459,6 +1465,7 @@ void ksu_susfs_handle_cleanup_mnt(struct mount *mnt)
 }
 #endif
 
+#if defined(CONFIG_KRETPROBES) && defined(CONFIG_KPROBES)
 static int ksu_susfs_vfs_create_mount_entry(struct kretprobe_instance *ri,
 					    struct pt_regs *regs)
 {
@@ -1528,7 +1535,9 @@ static int ksu_susfs_cleanup_mnt_pre(struct kprobe *p, struct pt_regs *regs)
 	ksu_susfs_mount_unmark_hidden(mnt);
 	return 0;
 }
+#endif /* KRETPROBES && KPROBES */
 
+#ifdef CONFIG_KRETPROBES
 static struct kretprobe *ksu_susfs_init_kretprobe(
 	const char *name, kretprobe_handler_t entry_handler,
 	kretprobe_handler_t handler, size_t data_size)
@@ -1571,6 +1580,8 @@ static void ksu_susfs_destroy_kretprobe(struct kretprobe **rp_ptr)
 	*rp_ptr = NULL;
 }
 
+#endif /* CONFIG_KRETPROBES */
+#ifdef CONFIG_KPROBES
 static struct kprobe *ksu_susfs_init_kprobe(const char *name,
 					    kprobe_pre_handler_t handler)
 {
@@ -1608,6 +1619,7 @@ static void ksu_susfs_destroy_kprobe(struct kprobe **kp_ptr)
 	kfree(kp);
 	*kp_ptr = NULL;
 }
+#endif /* CONFIG_KPROBES */
 
 void ksu_susfs_handle_setuid(uid_t old_uid, uid_t new_uid)
 {
@@ -1659,10 +1671,14 @@ static void ksu_susfs_mount_runtime_disable(void)
 	if (ret)
 		pr_err("susfs: failed to restore mntns get: %d\n", ret);
 #endif
+#if defined(CONFIG_KRETPROBES) && defined(CONFIG_KPROBES)
 	ksu_susfs_destroy_kretprobe(&ksu_susfs_vfs_create_mount_rp);
 	ksu_susfs_destroy_kretprobe(&ksu_susfs_clone_mnt_rp);
-	ksu_susfs_destroy_kretprobe(&ksu_susfs_mntns_get_rp);
 	ksu_susfs_destroy_kprobe(&ksu_susfs_cleanup_mnt_kp);
+#endif
+#ifdef CONFIG_KRETPROBES
+	ksu_susfs_destroy_kretprobe(&ksu_susfs_mntns_get_rp);
+#endif
 	cancel_delayed_work_sync(&ksu_susfs_mount_window_retry_work);
 	ksu_susfs_mount_clear_hidden_all();
 	ksu_susfs_clear_pkg_anchors_all();
@@ -1701,6 +1717,7 @@ static int ksu_susfs_mount_runtime_enable(void)
 		goto err_out;
 	}
 
+#ifdef CONFIG_KRETPROBES
 	ksu_susfs_vfs_create_mount_rp = ksu_susfs_init_kretprobe(
 		"vfs_create_mount", ksu_susfs_vfs_create_mount_entry,
 		ksu_susfs_vfs_create_mount_handler,
@@ -1719,6 +1736,8 @@ static int ksu_susfs_mount_runtime_enable(void)
 		goto err_out;
 	}
 
+#endif /* CONFIG_KRETPROBES */
+#ifdef CONFIG_KPROBES
 	ksu_susfs_cleanup_mnt_kp = ksu_susfs_init_kprobe(
 		"cleanup_mnt", ksu_susfs_cleanup_mnt_pre);
 	if (!ksu_susfs_cleanup_mnt_kp) {
@@ -1726,12 +1745,15 @@ static int ksu_susfs_mount_runtime_enable(void)
 		goto err_out;
 	}
 
+#endif /* CONFIG_KPROBES */
+#ifdef CONFIG_KRETPROBES
 	ksu_susfs_mntns_get_rp =
 		ksu_susfs_init_kretprobe("mntns_get", NULL,
 					 ksu_susfs_mntns_get_handler, 0);
 	if (!ksu_susfs_mntns_get_rp) {
 		pr_warn("susfs: mnt namespace identity hook unavailable\n");
 	}
+#endif /* CONFIG_KRETPROBES */
 #ifdef CONFIG_KSU_HACK_ARM64_BRANCH_LINK
 	err = ksu_susfs_patch_mntns_get();
 	if (err) {
@@ -1776,14 +1798,20 @@ err_out:
 
 void ksu_susfs_disable_mount_probe_fallback(void)
 {
+#if defined(CONFIG_KRETPROBES) && defined(CONFIG_KPROBES)
+#if defined(CONFIG_KRETPROBES) && defined(CONFIG_KPROBES)
 	ksu_susfs_destroy_kretprobe(&ksu_susfs_vfs_create_mount_rp);
 	ksu_susfs_destroy_kretprobe(&ksu_susfs_clone_mnt_rp);
 	ksu_susfs_destroy_kprobe(&ksu_susfs_cleanup_mnt_kp);
+#endif
+#endif
 }
 
 void ksu_susfs_disable_mntns_probe_fallback(void)
 {
+#ifdef CONFIG_KRETPROBES
 	ksu_susfs_destroy_kretprobe(&ksu_susfs_mntns_get_rp);
+#endif
 }
 
 #if KSU_SUSFS_CMDLINE_USE_PROC_SHOW_HOOK

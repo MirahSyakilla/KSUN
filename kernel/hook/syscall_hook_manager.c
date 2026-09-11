@@ -1,6 +1,8 @@
 #include "linux/printk.h"
 #include <linux/spinlock.h>
+#if defined(CONFIG_KPROBES) && defined(CONFIG_KRETPROBES)
 #include <linux/kprobes.h>
+#endif
 #include <linux/tracepoint.h>
 #include <asm/syscall.h>
 #include <linux/ptrace.h>

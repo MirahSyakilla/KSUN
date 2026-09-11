@@ -7,7 +7,9 @@
 #include <linux/fs.h>
 #include <linux/fsnotify.h>
 #include <linux/kernel.h>
+#ifdef CONFIG_KPROBES
 #include <linux/kprobes.h>
+#endif
 #include <linux/namei.h>
 #include <linux/security.h>
 #include <linux/slab.h>
@@ -47,7 +49,7 @@ static inline void ksu_nomount_filename_ref_init(struct filename *name)
  * association.  Keeping the native constructor ordering also makes the
  * replacement visible to audit exactly where the upstream NoMount patch does.
  */
-static struct filename *notrace ksu_nomount_getname_flags(
+struct filename *notrace ksu_nomount_getname_flags(
 	const char __user *filename, int flags, int *empty)
 {
 	struct filename *result;
@@ -112,7 +114,7 @@ static struct filename *notrace ksu_nomount_getname_flags(
 	return result;
 }
 
-static struct filename *notrace ksu_nomount_getname_kernel(
+struct filename *notrace ksu_nomount_getname_kernel(
 	const char *filename)
 {
 	struct filename *result;
@@ -147,6 +149,7 @@ static struct filename *notrace ksu_nomount_getname_kernel(
 	return result;
 }
 
+#ifdef CONFIG_KPROBES
 struct ksu_nomount_redirect_probe {
 	struct kprobe kp;
 	unsigned long replacement;
@@ -176,8 +179,9 @@ static void ksu_nomount_redirect_post_handler(struct kprobe *kp,
 static struct ksu_nomount_redirect_probe ksu_nomount_getname_flags_probe;
 static struct ksu_nomount_redirect_probe ksu_nomount_getname_kernel_probe;
 static struct ksu_nomount_redirect_probe ksu_nomount_iterate_dir_probe;
+#endif /* CONFIG_KPROBES */
 
-static int notrace ksu_nomount_iterate_dir(struct file *file,
+int notrace ksu_nomount_iterate_dir(struct file *file,
 					   struct dir_context *ctx)
 {
 	struct inode *inode = file_inode(file);
@@ -241,6 +245,7 @@ static int notrace ksu_nomount_iterate_dir(struct file *file,
 #endif
 }
 
+#ifdef CONFIG_KRETPROBES
 static struct kretprobe ksu_nomount_permission_rp;
 static struct kretprobe ksu_nomount_generic_permission_rp;
 static struct kretprobe ksu_nomount_dpath_rp;
@@ -251,12 +256,18 @@ static bool ksu_nomount_generic_permission_registered;
 static bool ksu_nomount_dpath_registered;
 static bool ksu_nomount_getattr_registered;
 static bool ksu_nomount_statfs_registered;
+#endif /* CONFIG_KRETPROBES */
 
 bool ksu_nomount_getattr_runtime_ready(void)
 {
+#ifdef CONFIG_KRETPROBES
 	return READ_ONCE(ksu_nomount_getattr_registered);
+#else
+	return false;
+#endif
 }
 
+#ifdef CONFIG_KRETPROBES
 struct ksu_nomount_permission_ctx {
 	struct inode *inode;
 	int mask;
@@ -402,7 +413,9 @@ static int ksu_nomount_getattr_handler(struct kretprobe_instance *ri,
 	}
 	return 0;
 }
+#endif /* CONFIG_KRETPROBES (nomount probe handlers) */
 
+#ifdef CONFIG_KPROBES
 static int ksu_nomount_register_redirect(
 	struct ksu_nomount_redirect_probe *probe, const char *symbol,
 	unsigned long replacement)
@@ -428,7 +441,9 @@ static void ksu_nomount_unregister_redirect(
 	unregister_kprobe(&probe->kp);
 	probe->registered = false;
 }
+#endif /* CONFIG_KPROBES */
 
+#ifdef CONFIG_KRETPROBES
 static int ksu_nomount_init_kretprobe(struct kretprobe *rp,
 					      const char *symbol,
 					      kretprobe_handler_t entry,
@@ -457,7 +472,20 @@ static void ksu_nomount_unregister_kretprobe(struct kretprobe *rp,
 		pr_warn("NoMount: %s return probe missed %d calls\n",
 			symbol, rp->nmissed);
 }
+#endif /* CONFIG_KRETPROBES */
 
+#if !defined(CONFIG_KPROBES) && !defined(CONFIG_KRETPROBES)
+/* Zero-probe configuration: the branch-link families are the only live
+ * interception path; the probe fallback is compiled out entirely. */
+int ksu_nomount_hooks_init(void)
+{
+	return 0;
+}
+
+void ksu_nomount_hooks_exit(void)
+{
+}
+#else
 int ksu_nomount_hooks_init(void)
 {
 	int err;
@@ -519,6 +547,90 @@ fail:
 	return err;
 }
 
+#endif /* probe fallback compiled out */
+/*
+ * Called by the branch-link d_path family after every compiled d_path
+ * caller has been branch-rewritten to the spoofing wrapper.  Unregisters
+ * the d_path kretprobe; the wrapper now applies the same gates and policy
+ * at the same final-result point.  If the branch-link family later rolls
+ * back, the probe is gone for the boot session (the kernel keeps running
+ * with NoMount redirection + hide rules only, without d_path spoofing) --
+ * retire only happens on a full, committed family install, and the family
+ * fails closed on any manifest miss.
+ */
+void ksu_nomount_dpath_kretprobe_retire(void)
+{
+#ifdef CONFIG_KRETPROBES
+	ksu_nomount_unregister_kretprobe(
+		&ksu_nomount_dpath_rp, "d_path",
+		&ksu_nomount_dpath_registered);
+#endif
+	pr_info("NoMount: d_path kretprobe retired (branch-link active)\n");
+}
+
+/*
+ * Called by the branch-link getattr family after the vfs_getattr_nosec
+ * call site has been branch-rewritten to the fused SUSFS/NoMount wrapper.
+ * Unregisters the vfs_getattr_nosec kretprobe; the wrapper now applies the
+ * same gates and the full SUSFS metadata layer at the same final-result
+ * point.  If the branch-link family later rolls back, the probe is gone
+ * for the boot session (stat-family spoofing continues via the syscall
+ * wrappers' kstat-identity path) -- retire only happens on a full,
+ * committed family install, and the family fails closed on any manifest
+ * miss.
+ */
+void ksu_nomount_getattr_kretprobe_retire(void)
+{
+#ifdef CONFIG_KRETPROBES
+	ksu_nomount_unregister_kretprobe(
+		&ksu_nomount_getattr_rp, "vfs_getattr_nosec",
+		&ksu_nomount_getattr_registered);
+#endif
+	pr_info("NoMount: getattr kretprobe retired (branch-link active)\n");
+}
+
+/*
+ * Called by the branch-link getname/iterate families after all three
+ * replacement manifests have committed.  Unregisters the three PC-redirect
+ * kprobes; every call site now invokes the KSU replacements directly,
+ * which is observably identical to the entry-PC redirect.  If any family
+ * later rolls back the probes are gone for the boot session -- retire only
+ * happens on full, committed installs of all three families together.
+ */
+void ksu_nomount_redirect_kprobes_retire(void)
+{
+#ifdef CONFIG_KPROBES
+	ksu_nomount_unregister_redirect(&ksu_nomount_iterate_dir_probe);
+	ksu_nomount_unregister_redirect(&ksu_nomount_getname_kernel_probe);
+	ksu_nomount_unregister_redirect(&ksu_nomount_getname_flags_probe);
+#endif
+	pr_info("NoMount: getname/iterate redirect kprobes retired (branch-link active)\n");
+}
+
+/*
+ * Called by the branch-link permission family after every inode_permission
+ * caller has been branch-rewritten to the force-allow wrapper.  Unregisters
+ * the inode_permission/generic_permission kretprobe pair; the wrapper now
+ * applies the same policy at the same final-result point.  If the branch-link
+ * family later rolls back, the probes are gone for the boot session (the
+ * kernel keeps running with NoMount redirection + hide rules only, without
+ * permission force-allow) -- retire only happens on a full, committed
+ * family install, and the family fails closed on any manifest miss.
+ */
+void ksu_nomount_permission_kretprobes_retire(void)
+{
+#ifdef CONFIG_KRETPROBES
+	ksu_nomount_unregister_kretprobe(
+		&ksu_nomount_generic_permission_rp, "generic_permission",
+		&ksu_nomount_generic_permission_registered);
+	ksu_nomount_unregister_kretprobe(
+		&ksu_nomount_permission_rp, "inode_permission",
+		&ksu_nomount_permission_registered);
+#endif
+	pr_info("NoMount: permission kretprobes retired (branch-link active)\n");
+}
+
+#if defined(CONFIG_KPROBES) || defined(CONFIG_KRETPROBES)
 void ksu_nomount_hooks_exit(void)
 {
 	/* Stop entry redirection before tearing down policy callbacks. */
@@ -540,3 +652,4 @@ void ksu_nomount_hooks_exit(void)
 		&ksu_nomount_permission_rp, "inode_permission",
 		&ksu_nomount_permission_registered);
 }
+#endif /* probe configs */

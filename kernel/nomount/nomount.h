@@ -89,6 +89,14 @@ bool ksu_nomount_lookup_scope_matches(int dfd);
 int ksu_nomount_handle_iterate_dir(struct file *file,
 				   struct dir_context *ctx);
 bool ksu_nomount_handle_permission(struct inode *inode, int mask);
+void ksu_nomount_permission_kretprobes_retire(void);
+void ksu_nomount_dpath_kretprobe_retire(void);
+void ksu_nomount_getattr_kretprobe_retire(void);
+void ksu_nomount_redirect_kprobes_retire(void);
+struct filename *ksu_nomount_getname_flags(const char __user *filename,
+					   int flags, int *empty);
+struct filename *ksu_nomount_getname_kernel(const char *filename);
+int ksu_nomount_iterate_dir(struct file *file, struct dir_context *ctx);
 char *ksu_nomount_handle_dpath(const struct path *path, char *buf, int buflen,
 			       const char *native_path);
 void ksu_nomount_handle_getattr(long ret, const struct path *path,

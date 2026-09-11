@@ -1,7 +1,7 @@
 #ifndef __KSU_H_EXECMEM_COMPAT
 #define __KSU_H_EXECMEM_COMPAT
 
-#ifdef CONFIG_KSU_KPROBES_HOOK
+#ifdef CONFIG_KSU_HOOK_CORE
 void ksu_execmem_compat_init(void);
 void ksu_execmem_compat_exit(void);
 void ksu_execmem_compat_refresh(void);

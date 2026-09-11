@@ -11,7 +11,7 @@
 #include "selinux/execmem_compat.h"
 #include "manager/manager_observer.h"
 #include "manager/throne_tracker.h"
-#ifdef CONFIG_KSU_KPROBES_SUSFS
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
 #include "susfs/susfs.h"
 #endif
 
@@ -80,7 +80,7 @@ void on_boot_completed(void)
     if (ksu_module_mounted)
         ksu_selinux_hide_drop_backup_if_unused();
     ksu_avc_spoof_late_init();
-#ifdef CONFIG_KSU_KPROBES_SUSFS
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
     ksu_susfs_handle_boot_completed();
 #endif
 }

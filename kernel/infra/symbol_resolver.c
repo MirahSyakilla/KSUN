@@ -224,9 +224,24 @@ unsigned long find_kernel_symbol_next_address(unsigned long addr)
 #if ALWAYS_HAVE_ON_EACH_SYMBOL
     kallsyms_on_each_symbol(next_symbol_cb, &ctx);
 #else
-    if (!kallsyms_on_each_symbol_fn)
-        return 0;
-    kallsyms_on_each_symbol_fn(next_symbol_cb, &ctx);
+    if (kallsyms_on_each_symbol_fn) {
+        kallsyms_on_each_symbol_fn(next_symbol_cb, &ctx);
+        if (ctx.next)
+            return ctx.next;
+    }
+    /* Fallback when kallsyms_on_each_symbol is unavailable (e.g. stripped
+     * from kallsyms under some configurations): derive the boundary from
+     * the symbol's own recorded size.  The scanner bounds at function
+     * ends; without this the fixed window overruns into the next packed
+     * function and steals its call sites. */
+    {
+        unsigned long symbolsize = 0;
+        unsigned long offset = 0;
+
+        if (kallsyms_lookup_size_offset(addr, &symbolsize, &offset) &&
+            symbolsize)
+            return addr + symbolsize;
+    }
 #endif
     return ctx.next;
 }

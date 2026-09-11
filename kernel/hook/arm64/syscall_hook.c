@@ -13,6 +13,25 @@
 syscall_fn_t *ksu_syscall_table = NULL;
 int ksu_dispatcher_nr = -1;
 
+#ifdef CONFIG_COMPAT
+/*
+ * The AArch32 compat ABI reaches the same handlers through a second table.
+ * The old reboot kprobe hooked the shared handler function, so it caught
+ * both ABIs; table tampering must hook both slots to preserve that
+ * coverage.  Slots are verified by identity before use: a compat entry that
+ * does not currently point at the same handler as the native slot is left
+ * untouched (the mapping is a profile property, not a contract).
+ */
+static syscall_fn_t *ksu_compat_syscall_table;
+static int ksu_compat_nr_map[__NR_syscalls];
+
+static syscall_fn_t *ksu_compat_table_resolve(void)
+{
+    return (syscall_fn_t *)ksu_resolve_symbol_for_functable_hook(
+        "compat_sys_call_table");
+}
+#endif
+
 // Hook registration table — read with READ_ONCE from tracepoint/dispatcher
 // context, written with WRITE_ONCE from init/exit context.
 static ksu_syscall_hook_fn syscall_hooks[__NR_syscalls];
@@ -215,6 +234,20 @@ static long __nocfi ksu_direct_syscall_dispatcher(KSU_SYSCALL_WRAPPER_ARGS)
     if (orig_nr < 0 || orig_nr >= __NR_syscalls)
         orig_nr = (int)PT_REGS_ORIG_SYSCALL(call_regs);
 
+#ifdef CONFIG_COMPAT
+    /* Compat tasks carry the AArch32 number; hooks are keyed by the
+     * native number.  Translate through the verified compat map. */
+    if (unlikely(is_compat_task()) && orig_nr >= 0 &&
+        orig_nr < __NR_syscalls) {
+        int mapped = READ_ONCE(ksu_compat_nr_map[orig_nr]);
+
+        if (mapped >= 0)
+            orig_nr = mapped;
+        else
+            return -ENOSYS;
+    }
+#endif
+
     if (likely(orig_nr >= 0 && orig_nr < __NR_syscalls)) {
         ksu_syscall_hook_fn fn = READ_ONCE(syscall_hooks[orig_nr]);
         if (likely(fn))
@@ -246,6 +279,45 @@ int ksu_register_syscall_hook(int nr, ksu_syscall_hook_fn fn)
         WRITE_ONCE(syscall_hooks[nr], NULL);
         return ret;
     }
+#ifdef CONFIG_COMPAT
+    /* Compat mirror: when the compat table's slot currently points at the
+     * same handler as the native slot did, replace it too so 32-bit
+     * callers take the same hook route.  The map is keyed compat→native
+     * (the dispatcher's translation direction); at registration time the
+     * compat slot for a native nr is found by scanning the (tiny) map. */
+    if (ksu_compat_syscall_table && nr >= 0 && nr < __NR_syscalls) {
+        int compat_nr = -1;
+        int i;
+
+        for (i = 0; i < __NR_syscalls; i++) {
+            if (READ_ONCE(ksu_compat_nr_map[i]) == nr) {
+                compat_nr = i;
+                break;
+            }
+        }
+
+        if (compat_nr >= 0) {
+            syscall_fn_t native_orig = ksu_get_syscall_invoke_target(nr);
+            syscall_fn_t compat_cur =
+                READ_ONCE(ksu_compat_syscall_table[compat_nr]);
+
+            if (compat_cur == native_orig) {
+                if (ksu_patch_text(
+                        &ksu_compat_syscall_table[compat_nr],
+                        &(syscall_fn_t){ (syscall_fn_t)
+                                            ksu_direct_syscall_dispatcher },
+                        sizeof(syscall_fn_t),
+                        KSU_PATCH_TEXT_FLUSH_DCACHE))
+                    pr_warn("compat syscall %d hook failed\n", compat_nr);
+                else
+                    pr_info("compat syscall %d hooked\n", compat_nr);
+            } else {
+                pr_info("compat slot %d no longer mirrors native %d; "
+                        "not hooked\n", compat_nr, nr);
+            }
+        }
+    }
+#endif
 #endif
     pr_info("registered syscall hook for nr=%d\n", nr);
     return ret;
@@ -299,6 +371,38 @@ void __init ksu_syscall_hook_init(void)
     pr_info("dispatcher installed at slot %d\n", ksu_dispatcher_nr);
 #else
     pr_info("syscall table tamper dispatcher enabled\n");
+#endif
+
+#ifdef CONFIG_COMPAT
+#ifdef CONFIG_KSU_TAMPER_SYSCALL_TABLE
+    /* The dispatcher must translate compat syscall numbers: a compat task
+     * enters with the AArch32 number, while hooks and the native table
+     * are keyed by the native number. */
+    ksu_compat_syscall_table = ksu_compat_table_resolve();
+    memset(ksu_compat_nr_map, 0xff, sizeof(ksu_compat_nr_map));
+    if (ksu_compat_syscall_table) {
+        /* AArch32 reboot is nr 88 (asm/unistd32.h); reboot has no
+         * separate compat wrapper, so both tables point at the same
+         * __arm64_sys_reboot — verified against the shipped table. */
+        const int compat_reboot_nr = 88;
+
+        if (compat_reboot_nr >= 0 &&
+            compat_reboot_nr < __NR_syscalls) {
+            syscall_fn_t native = READ_ONCE(
+                ksu_syscall_table[__NR_reboot]);
+            syscall_fn_t compat =
+                READ_ONCE(ksu_compat_syscall_table[compat_reboot_nr]);
+
+            if (native == compat) {
+                /* Key compat→native: the dispatcher receives the AArch32
+                 * number and must translate to the native hook index. */
+                ksu_compat_nr_map[compat_reboot_nr] = __NR_reboot;
+                pr_info("compat reboot slot %d mirrors native\n",
+                        compat_reboot_nr);
+            }
+        }
+    }
+#endif
 #endif
 }
 
