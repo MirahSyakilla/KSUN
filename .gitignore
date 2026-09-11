@@ -11,3 +11,6 @@ validation/audit/dpath/
 validation/audit/getattr/
 validation/audit/getname/
 validation/audit/final/
+validation/audit/soak/
+validation/audit/config_cleanup/
+validation/audit/finalization/
