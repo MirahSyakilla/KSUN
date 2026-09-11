@@ -44,7 +44,11 @@ module ABI version `13`.
 ## Project status
 
 - Hookless SUSFS (`sus_path`, `open_redirect`, `sus_mount`, `sus_kstat`, `sus_map`,
-  `spoof_cmdline_or_bootconfig`, `spoof_uname`, `avc_log_spoofing`).
+  `spoof_cmdline_or_bootconfig`, `spoof_uname`, `avc_log_spoofing` — the last one only on kernels with
+  `CONFIG_AUDIT=y`, where it is implemented as a single-site branch-link
+  rewrite of the compiled `slow_avc_audit()` call; the common
+  `CONFIG_AUDIT=n` configuration has no AVC audit path to spoof and the
+  feature is absent by design).
 - Hookless NoMount (path redirection, whiteouts, synthetic directories, UID blocking,
   packed netlink ABI).
 - Syscall-table tampering, native and AArch32 compat.
@@ -197,6 +201,29 @@ hookless SUSFS/NoMount runtimes.
 Architecture: the branch-link scanner, syscall-table tamper, and NoMount are
 **ARM64**; `KSU_TAMPER_SYSCALL_TABLE` also supports `X86_64`. Older kernels may
 require the backports above; do not assume conditional code equals validated support.
+
+### Branch Link portability and manifests
+
+Branch Link manifests are **intentionally target-build-specific**: the scanner
+discovers the compiled call sites of each family from the target kernel's own
+Image/System.map at boot, validates every record (symbol identity, function
+boundaries, BL reach, duplicates), and fails closed if any REQUIRED site is
+missing. Addresses and site counts are therefore expected to differ between
+kernels, compilers, and configurations — that is the design, not a limitation.
+What is portable is the discovery/validation/patching/rollback machinery itself.
+Static analysis of an android13-5.15 GKI build confirmed every hook family has
+discoverable call sites there (e.g. `vfs_getattr_nosec` remains a standalone
+function with 21 sites on 5.15 vs a single site on the lisa 5.4 build); 5.15/
+6.x builds remain **unvalidated at runtime** until someone runs them.
+
+Note on `stat-fd`: on the lisa 5.4 build `vfs_fstat()` is fully inlined into the
+fd-stat syscall wrappers (which call `vfs_getattr()` directly), so that family
+has no independent patch point and reports not-ready. This is **not** a missing
+feature: the old symbol-scoped kretprobe never fired on this build's fd-stat
+path either, and the user-visible stat family is covered by the stat-path +
+kstat layers. On 5.15-style builds where the fd wrappers keep their
+`vfs_getattr_nosec` call, the existing stat-fd manifest routes resolve and the
+family activates.
 
 For detailed design notes see [docs/susfs-hookless.md](susfs-hookless.md) and
 [docs/nomount-hookless.md](nomount-hookless.md).

@@ -226,10 +226,16 @@ static int __ksu_avc_spoof_enable_locked(void)
 		}
 		slow_avc_audit_hook_installed = true;
 	}
-#endif
 	atomic_set(&disable_spoof, 0);
 	pr_info("avc_spoof/init: slow_avc_audit spoofing enabled!\n");
 	return 0;
+#else
+	/* CONFIG_KPROBES=n: the slow_avc_audit interception does not exist in
+	 * this build.  Report accurately instead of falling through to the
+	 * "enabled" message with no mechanism behind it. */
+	pr_info("avc_spoof/init: slow_avc_audit interception not built (CONFIG_KPROBES=n): spoofing disabled\n");
+	return 0;
+#endif
 }
 
 static void __ksu_avc_spoof_disable_locked(void)
