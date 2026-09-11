@@ -1,8 +1,11 @@
 # KernelSU Runtime NoMount
 
 This tree hosts a NoMount-compatible policy engine inside KernelSU-Next while
-leaving the main kernel `fs/` sources untouched.  "Hookless" here means no
-per-version source patch: the runtime still requires kprobes and kretprobes.
+leaving the main kernel `fs/` sources untouched.  "Hookless" means no kprobes,
+kretprobes, or ftrace-style runtime probes: interception uses compiled
+branch-link call-site rewrites, syscall-table slots, and existing
+function-pointer/ops-table structures (the permission probe pair, d_path,
+getattr, getname, and iterate_dir probes were all migrated off kprobes).
 The behavior is modeled on `maxsteeel/nomount` `master`, not its
 `experimental/hookless` branch.
 
@@ -11,12 +14,12 @@ The behavior is modeled on `maxsteeel/nomount` `master`, not its
 Enable:
 
 ```text
-CONFIG_KSU_KPROBES_HOOK=y
-CONFIG_KSU_KPROBES_SUSFS=y
-CONFIG_KSU_KPROBES_NOMOUNT=y
+CONFIG_KSU_HOOK_CORE=y
+CONFIG_KSU_HOOKLESS_SUSFS=y
+CONFIG_KSU_HOOKLESS_NOMOUNT=y
 ```
 
-`KSU_KPROBES_NOMOUNT` also requires `NET`.  Android ARM64 4.19 and 5.4 are the
+`KSU_HOOKLESS_NOMOUNT` also requires `NET`.  Android ARM64 4.19 and 5.4 are the
 supported targets.  Initialization is fail-closed: if a required pathname,
 directory, permission, `d_path`, `vfs_getattr_nosec`, or `statfs` probe cannot
 be registered, the Generic Netlink family is not exposed.

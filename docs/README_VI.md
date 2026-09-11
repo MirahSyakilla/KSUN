@@ -31,7 +31,28 @@ Hiện tại kernelSU Next chỉ hỗ trợ những cpu có `arm64-v8a`, `armeab
 
 ## Sử dụng
 
-- [Hướng dẫn vá KernelSU Next vào Kernel của bạn (yêu cầu kernel source)](https://ksunext.org/pages/installation.html)
+This is a **kernel-source integration** step for kernel developers (not an Android APK installation). From the root of your kernel source tree:
+
+```bash
+curl -LSs "https://raw.githubusercontent.com/MirahSyakilla/KSUN/susfs+nomount-hookless/kernel/setup.sh" | bash -
+```
+
+The script clones/updates this repository into `KernelSU-Next/`, symlinks `drivers/kernelsu`, and registers it in the drivers `Makefile`/`Kconfig`.
+
+Required defconfig:
+
+```text
+CONFIG_KSU=y
+CONFIG_KSU_HOOK_CORE=y
+CONFIG_KSU_TAMPER_SYSCALL_TABLE=y
+CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y
+CONFIG_KSU_HOOKLESS_SUSFS=y
+CONFIG_KSU_HOOKLESS_NOMOUNT=y
+# CONFIG_KPROBES is not set
+# CONFIG_KRETPROBES is not set
+```
+
+KPROBES/KRETPROBES are **not required** by the hookless configuration; canonical reference: [English README](README.md).
 
 ## Bảo mật
 
@@ -41,20 +62,6 @@ Hiện tại kernelSU Next chỉ hỗ trợ những cpu có `arm64-v8a`, `armeab
 
 - Những thư mục/tập tin trong `kernel` là giấy phép [GPL-2.0-only](https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html).
 - Những thư mục/tập tin ngoài `kernel` là giấy phép [GPL-3.0-or-later](https://www.gnu.org/licenses/gpl-3.0.html).
-
-## Quyên góp/Hỗ trợ
-
-- 0x12b5224b7aca0121c2f003240a901e1d064371c1 [ USDT BEP20 ]
-
-- TYUVMWGTcnR5svnDoX85DWHyqUAeyQcdjh [ USDT TRC20 ]
-
-- 0x12b5224b7aca0121c2f003240a901e1d064371c1 [ USDT ERC20 ]
-
-- 0x12b5224b7aca0121c2f003240a901e1d064371c1 [ ETH ERC20 ]
-
-- Ld238uYBuRQdZB5YwdbkuU6ektBAAUByoL [ LTC ]
-
-- 19QgifcjMjSr1wB2DJcea5cxitvWVcXMT6 [ BTC ]
 
 ## Lời cảm ơn tới...
 

@@ -31,7 +31,28 @@ Saat ini, hanya `arm64-v8a`, `armeabi-v7a` & `x86_64` yang didukung.
 
 ## Penggunaan
 
-- [Petunjuk instalasi](https://ksunext.org/pages/installation.html)
+This is a **kernel-source integration** step for kernel developers (not an Android APK installation). From the root of your kernel source tree:
+
+```bash
+curl -LSs "https://raw.githubusercontent.com/MirahSyakilla/KSUN/susfs+nomount-hookless/kernel/setup.sh" | bash -
+```
+
+The script clones/updates this repository into `KernelSU-Next/`, symlinks `drivers/kernelsu`, and registers it in the drivers `Makefile`/`Kconfig`.
+
+Required defconfig:
+
+```text
+CONFIG_KSU=y
+CONFIG_KSU_HOOK_CORE=y
+CONFIG_KSU_TAMPER_SYSCALL_TABLE=y
+CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y
+CONFIG_KSU_HOOKLESS_SUSFS=y
+CONFIG_KSU_HOOKLESS_NOMOUNT=y
+# CONFIG_KPROBES is not set
+# CONFIG_KRETPROBES is not set
+```
+
+KPROBES/KRETPROBES are **not required** by the hookless configuration; canonical reference: [English README](README.md).
 
 ## Keamanan
 

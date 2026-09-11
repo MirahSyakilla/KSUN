@@ -7,8 +7,8 @@ into `KernelSU-Next` only.
 
 The target configuration is:
 
-- `CONFIG_KSU_KPROBES_HOOK=y`
-- `CONFIG_KSU_KPROBES_SUSFS=y`
+- `CONFIG_KSU_HOOK_CORE=y`
+- `CONFIG_KSU_HOOKLESS_SUSFS=y`
 
 On the Lisa kernel tree, `drivers/kernelsu` resolves to
 `KernelSU-Next/kernel`, so the hookless SUSFS layer is consumed through the
@@ -52,10 +52,12 @@ Path-facing features follow the same general idea as NoMount:
 
 Global proc/mm surfaces use small KSU-owned runtime instrumentation:
 
-- kprobes and kretprobes
 - runtime procfs file-operation replacement
 - runtime `seq_operations` replacement
 - existing KSU hooks where they are already available
+- branch-link call-site rewrites (the former kprobe/kretprobe paths were
+  migrated off kprobes; the kernel's generic CONFIG_KPROBES/CONFIG_KRETPROBES
+  are not required)
 
 This keeps the maintenance boundary narrow while still covering SUSFS features
 that cannot be expressed as a pure VFS overlay.
@@ -137,7 +139,7 @@ The current flow is:
 
 1. SUSFS receives the KSU setuid callback.
 2. Work is deferred through task work so the logic does not run in atomic
-   kprobe context.
+   (syscall-entry) context.
 3. The main package process is cached as a package anchor.
 4. Same-package helpers such as `:tools` or isolated children try to join the
    anchor's mount namespace.
@@ -225,7 +227,7 @@ That knob is symbol-hardening work, not required for the hookless migration.
 The hookless layer is intentionally conservative in a few places:
 
 - root and zygote-side readers keep the stock procfs path
-- SUSFS compat work is deferred out of atomic kprobe context
+- SUSFS compat work is deferred out of atomic (syscall-entry) context
 - package-helper namespace joins only apply to app or isolated processes that
   are already eligible for the KSU mount-hide view
 
@@ -257,8 +259,8 @@ process still shared its `fs_struct`.
 
 Enable SUSFS hookless with:
 
-- `CONFIG_KSU_KPROBES_HOOK=y`
-- `CONFIG_KSU_KPROBES_SUSFS=y`
+- `CONFIG_KSU_HOOK_CORE=y`
+- `CONFIG_KSU_HOOKLESS_SUSFS=y`
 - `CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y` for `open_redirect` and the direct
   ARM64 kstat/mount runtime paths
 
@@ -293,8 +295,8 @@ dispatcher and hosts its ARM64 callsite scanner entirely inside the KSU runtime.
 Linux 4.9 is the lower best-effort source boundary. Its linked-list VMAs, old
 page walker, flex arrays, raw-argument syscall table, and list-based LSM hooks
 have compatibility paths, but this combination is not live-device validated.
-The target must still provide Kprobes, kretprobes, syscall tracepoints, procfs,
-and the Android vendor interfaces required by `CONFIG_KSU_KPROBES_HOOK`.
+The target must still provide syscall tracepoints, procfs, and the Android
+vendor interfaces consumed by `CONFIG_KSU_HOOK_CORE`.
 
 Linux 3.10 and 3.18 are not supported by hookless SUSFS. They predate several
 required VFS and KernelSU hook interfaces; supporting them would amount to a

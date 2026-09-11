@@ -53,34 +53,34 @@ KernelSU Next, **4.4 ile 6.6** arasındaki Android çekirdeklerini destekler.
 ---
 
 ## 📦 Kurulum
+This is a **kernel-source integration** step for kernel developers (not an Android APK installation). From the root of your kernel source tree:
 
-Kurulum talimatları için [Kurulum Kılavuzu](https://kernelsu-next.github.io/webpage/pages/installation.html) sayfasına bakınız.
+```bash
+curl -LSs "https://raw.githubusercontent.com/MirahSyakilla/KSUN/susfs+nomount-hookless/kernel/setup.sh" | bash -
+```
 
----
+The script clones/updates this repository into `KernelSU-Next/`, symlinks `drivers/kernelsu`, and registers it in the drivers `Makefile`/`Kconfig`. Use `--cleanup` to revert.
 
+Required defconfig:
+
+```text
+CONFIG_KSU=y
+CONFIG_KSU_HOOK_CORE=y
+CONFIG_KSU_TAMPER_SYSCALL_TABLE=y
+CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y
+CONFIG_KSU_HOOKLESS_SUSFS=y
+CONFIG_KSU_HOOKLESS_NOMOUNT=y
+# CONFIG_KPROBES is not set
+# CONFIG_KRETPROBES is not set
+```
+
+KPROBES/KRETPROBES are **not required** by the hookless configuration; the canonical technical reference is the [English README](README.md).
 ## 🏅 Güvenlik
-
-Güvenlik açıklarını bildirmek için lütfen [SECURITY.md](/SECURITY.md) dosyasına bakınız.
-
----
-
+- To report security issues, see [SECURITY.md](/SECURITY.md).
 ## 📜 Lisans
 
 - **`/kernel` dizini:** [Yalnızca GPL-2.0](https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html).
 - **Diğer tüm dosyalar:** [GPL-3.0-veya-sonrası](https://www.gnu.org/licenses/gpl-3.0.html).
-
----
-
-## 💸 Bağışlar
-
-Projeye destek olmak isterseniz:
-
-- **USDT (BEP20, ERC20)**: `0x12b5224b7aca0121c2f003240a901e1d064371c1`
-- **USDT (TRC20)**: `TYUVMWGTcnR5svnDoX85DWHyqUAeyQcdjh`
-- **USDT (SOL)**: `A4wqBXYd6Ey4nK4SJ2bmjeMgGyaLKT9TwDLh8BEo8Zu6`
-- **ETH (ERC20)**: `0x12b5224b7aca0121c2f003240a901e1d064371c1`
-- **LTC**: `Ld238uYBuRQdZB5YwdbkuU6ektBAAUByoL`
-- **BTC**: `19QgifcjMjSr1wB2DJcea5cxitvWVcXMT6`
 
 ---
 
