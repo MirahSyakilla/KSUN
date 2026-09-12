@@ -1,0 +1,521 @@
+[
+  {
+    "family": "avc/slow_avc_audit",
+    "target": "slow_avc_audit",
+    "target_va": "0xffffffc010451f10",
+    "policy": "ALL_DIRECT_CALLERS",
+    "drift": "DRIFT_NONE",
+    "sites": [
+      {
+        "caller": "avc_has_extended_perms",
+        "caller_va": "0xffffffc010452590",
+        "site_va": "0xffffffc0104528f0",
+        "site_offset": "0x360",
+        "raw": "0x97fffd88"
+      },
+      {
+        "caller": "avc_has_perm",
+        "caller_va": "0xffffffc0104530c0",
+        "site_va": "0xffffffc010453254",
+        "site_offset": "0x194",
+        "raw": "0x97fffb2f"
+      },
+      {
+        "caller": "avc_has_perm_flags",
+        "caller_va": "0xffffffc0104532b0",
+        "site_va": "0xffffffc010453458",
+        "site_offset": "0x1a8",
+        "raw": "0x97fffaae"
+      },
+      {
+        "caller": "selinux_capable",
+        "caller_va": "0xffffffc010455520",
+        "site_va": "0xffffffc010455630",
+        "site_offset": "0x110",
+        "raw": "0x97fff238"
+      },
+      {
+        "caller": "selinux_file_ioctl",
+        "caller_va": "0xffffffc010459640",
+        "site_va": "0xffffffc010459740",
+        "site_offset": "0x100",
+        "raw": "0x97ffe1f4"
+      },
+      {
+        "caller": "audit_inode_permission",
+        "caller_va": "0xffffffc01045ec70",
+        "site_va": "0xffffffc01045ecf4",
+        "site_offset": "0x84",
+        "raw": "0x97ffcc87"
+      },
+      {
+        "caller": "has_cap_mac_admin",
+        "caller_va": "0xffffffc01045ed20",
+        "site_va": "0xffffffc01045ee1c",
+        "site_offset": "0xfc",
+        "raw": "0x97ffcc3d"
+      }
+    ],
+    "rejected": []
+  },
+  {
+    "family": "permission/inode_permission",
+    "target": "inode_permission",
+    "target_va": "0xffffffc01025a990",
+    "policy": "ALL_DIRECT_CALLERS",
+    "drift": "DRIFT_NONE",
+    "sites": [
+      {
+        "caller": "prctl_set_mm",
+        "caller_va": "0xffffffc0100777e0",
+        "site_va": "0xffffffc010077aa0",
+        "site_offset": "0x2c0",
+        "raw": "0x94078bbc"
+      },
+      {
+        "caller": "cgroup_procs_write_permission",
+        "caller_va": "0xffffffc010128790",
+        "site_va": "0xffffffc01012880c",
+        "site_offset": "0x7c",
+        "raw": "0x9404c861"
+      },
+      {
+        "caller": "bpf_obj_get_user",
+        "caller_va": "0xffffffc010197030",
+        "site_va": "0xffffffc0101970b4",
+        "site_offset": "0x84",
+        "raw": "0x94030e37"
+      },
+      {
+        "caller": "bpf_prog_get_type_path",
+        "caller_va": "0xffffffc010197240",
+        "site_va": "0xffffffc010197290",
+        "site_offset": "0x50",
+        "raw": "0x94030dc0"
+      },
+      {
+        "caller": "__arm64_sys_mincore",
+        "caller_va": "0xffffffc010212820",
+        "site_va": "0xffffffc01021295c",
+        "site_offset": "0x13c",
+        "raw": "0x9401200d"
+      },
+      {
+        "caller": "do_madvise",
+        "caller_va": "0xffffffc01022fc50",
+        "site_va": "0xffffffc010230044",
+        "site_offset": "0x3f4",
+        "raw": "0x9400aa53"
+      },
+      {
+        "caller": "madvise_cold_or_pageout_pte_range",
+        "caller_va": "0xffffffc010230d70",
+        "site_va": "0xffffffc010230e34",
+        "site_offset": "0xc4",
+        "raw": "0x9400a6d7"
+      },
+      {
+        "caller": "vfs_truncate",
+        "caller_va": "0xffffffc0102480e0",
+        "site_va": "0xffffffc010248148",
+        "site_offset": "0x68",
+        "raw": "0x94004a12"
+      },
+      {
+        "caller": "do_faccessat",
+        "caller_va": "0xffffffc010248910",
+        "site_va": "0xffffffc010248a0c",
+        "site_offset": "0xfc",
+        "raw": "0x940047e1"
+      },
+      {
+        "caller": "do_faccessat",
+        "caller_va": "0xffffffc010248910",
+        "site_va": "0xffffffc010248a9c",
+        "site_offset": "0x18c",
+        "raw": "0x940047bd"
+      },
+      {
+        "caller": "ksys_chdir",
+        "caller_va": "0xffffffc010248b90",
+        "site_va": "0xffffffc010248bdc",
+        "site_offset": "0x4c",
+        "raw": "0x9400476d"
+      },
+      {
+        "caller": "ksys_chdir",
+        "caller_va": "0xffffffc010248b90",
+        "site_va": "0xffffffc010248c20",
+        "site_offset": "0x90",
+        "raw": "0x9400475c"
+      },
+      {
+        "caller": "__arm64_sys_fchdir",
+        "caller_va": "0xffffffc010248cb0",
+        "site_va": "0xffffffc010248cf0",
+        "site_offset": "0x40",
+        "raw": "0x94004728"
+      },
+      {
+        "caller": "ksys_chroot",
+        "caller_va": "0xffffffc010248d40",
+        "site_va": "0xffffffc010248d8c",
+        "site_offset": "0x4c",
+        "raw": "0x94004701"
+      },
+      {
+        "caller": "ksys_chroot",
+        "caller_va": "0xffffffc010248d40",
+        "site_va": "0xffffffc010248dd0",
+        "site_offset": "0x90",
+        "raw": "0x940046f0"
+      },
+      {
+        "caller": "vfs_dedupe_file_range_one",
+        "caller_va": "0xffffffc01024e0c0",
+        "site_va": "0xffffffc01024e188",
+        "site_offset": "0xc8",
+        "raw": "0x94003202"
+      },
+      {
+        "caller": "flush_old_exec",
+        "caller_va": "0xffffffc0102564b0",
+        "site_va": "0xffffffc0102569d0",
+        "site_offset": "0x520",
+        "raw": "0x94000ff0"
+      },
+      {
+        "caller": "would_dump",
+        "caller_va": "0xffffffc010256d20",
+        "site_va": "0xffffffc010256d44",
+        "site_offset": "0x24",
+        "raw": "0x94000f13"
+      },
+      {
+        "caller": "prepare_binprm",
+        "caller_va": "0xffffffc010257130",
+        "site_va": "0xffffffc0102571c8",
+        "site_offset": "0x98",
+        "raw": "0x94000df2"
+      },
+      {
+        "caller": "lookup_one_len_common",
+        "caller_va": "0xffffffc01025b820",
+        "site_va": "0xffffffc01025b930",
+        "site_offset": "0x110",
+        "raw": "0x97fffc18"
+      },
+      {
+        "caller": "vfs_create",
+        "caller_va": "0xffffffc01025c030",
+        "site_va": "0xffffffc01025c0d0",
+        "site_offset": "0xa0",
+        "raw": "0x97fffa30"
+      },
+      {
+        "caller": "vfs_mkobj",
+        "caller_va": "0xffffffc01025c220",
+        "site_va": "0xffffffc01025c2d8",
+        "site_offset": "0xb8",
+        "raw": "0x97fff9ae"
+      },
+      {
+        "caller": "vfs_tmpfile",
+        "caller_va": "0xffffffc01025c3b0",
+        "site_va": "0xffffffc01025c3dc",
+        "site_offset": "0x2c",
+        "raw": "0x97fff96d"
+      },
+      {
+        "caller": "path_openat",
+        "caller_va": "0xffffffc01025c660",
+        "site_va": "0xffffffc01025c9f8",
+        "site_offset": "0x398",
+        "raw": "0x97fff7e6"
+      },
+      {
+        "caller": "vfs_mknod",
+        "caller_va": "0xffffffc01025d770",
+        "site_va": "0xffffffc01025d810",
+        "site_offset": "0xa0",
+        "raw": "0x97fff460"
+      },
+      {
+        "caller": "vfs_mkdir",
+        "caller_va": "0xffffffc01025dc50",
+        "site_va": "0xffffffc01025dce4",
+        "site_offset": "0x94",
+        "raw": "0x97fff32b"
+      },
+      {
+        "caller": "may_delete",
+        "caller_va": "0xffffffc01025e120",
+        "site_va": "0xffffffc01025e194",
+        "site_offset": "0x74",
+        "raw": "0x97fff1ff"
+      },
+      {
+        "caller": "vfs_symlink",
+        "caller_va": "0xffffffc01025eb40",
+        "site_va": "0xffffffc01025ebd0",
+        "site_offset": "0x90",
+        "raw": "0x97ffef70"
+      },
+      {
+        "caller": "vfs_link",
+        "caller_va": "0xffffffc01025eeb0",
+        "site_va": "0xffffffc01025ef70",
+        "site_offset": "0xc0",
+        "raw": "0x97ffee88"
+      },
+      {
+        "caller": "do_linkat",
+        "caller_va": "0xffffffc01025f180",
+        "site_va": "0xffffffc01025f344",
+        "site_offset": "0x1c4",
+        "raw": "0x97ffed93"
+      },
+      {
+        "caller": "vfs_rename",
+        "caller_va": "0xffffffc01025f540",
+        "site_va": "0xffffffc01025f624",
+        "site_offset": "0xe4",
+        "raw": "0x97ffecdb"
+      },
+      {
+        "caller": "vfs_rename",
+        "caller_va": "0xffffffc01025f540",
+        "site_va": "0xffffffc01025f644",
+        "site_offset": "0x104",
+        "raw": "0x97ffecd3"
+      },
+      {
+        "caller": "vfs_rename",
+        "caller_va": "0xffffffc01025f540",
+        "site_va": "0xffffffc01025f984",
+        "site_offset": "0x444",
+        "raw": "0x97ffec03"
+      },
+      {
+        "caller": "vfs_whiteout",
+        "caller_va": "0xffffffc01025fb90",
+        "site_va": "0xffffffc01025fc14",
+        "site_offset": "0x84",
+        "raw": "0x97ffeb5f"
+      },
+      {
+        "caller": "link_path_walk",
+        "caller_va": "0xffffffc0102608a0",
+        "site_va": "0xffffffc01026099c",
+        "site_offset": "0xfc",
+        "raw": "0x97ffe7fd"
+      },
+      {
+        "caller": "link_path_walk",
+        "caller_va": "0xffffffc0102608a0",
+        "site_va": "0xffffffc0102609c0",
+        "site_offset": "0x120",
+        "raw": "0x97ffe7f4"
+      },
+      {
+        "caller": "may_open",
+        "caller_va": "0xffffffc010262a00",
+        "site_va": "0xffffffc010262a98",
+        "site_offset": "0x98",
+        "raw": "0x97ffdfbe"
+      },
+      {
+        "caller": "notify_change",
+        "caller_va": "0xffffffc010273fd0",
+        "site_va": "0xffffffc010274088",
+        "site_offset": "0xb8",
+        "raw": "0x97ff9a42"
+      },
+      {
+        "caller": "xattr_permission",
+        "caller_va": "0xffffffc0102809e0",
+        "site_va": "0xffffffc010280a6c",
+        "site_offset": "0x8c",
+        "raw": "0x97ff67c9"
+      },
+      {
+        "caller": "__arm64_sys_inotify_add_watch",
+        "caller_va": "0xffffffc0102a6540",
+        "site_va": "0xffffffc0102a6604",
+        "site_offset": "0xc4",
+        "raw": "0x97fed0e3"
+      },
+      {
+        "caller": "fsverity_ioctl_enable",
+        "caller_va": "0xffffffc0102bc400",
+        "site_va": "0xffffffc0102bc510",
+        "site_offset": "0x110",
+        "raw": "0x97fe7920"
+      },
+      {
+        "caller": "configfs_symlink",
+        "caller_va": "0xffffffc0102f9a00",
+        "site_va": "0xffffffc0102f9c0c",
+        "site_offset": "0x20c",
+        "raw": "0x97fd8361"
+      },
+      {
+        "caller": "fuse_open_backing",
+        "caller_va": "0xffffffc0103ce4d0",
+        "site_va": "0xffffffc0103ce550",
+        "site_offset": "0x80",
+        "raw": "0x97fa3110"
+      },
+      {
+        "caller": "fuse_access_backing",
+        "caller_va": "0xffffffc0103d1bc0",
+        "site_va": "0xffffffc0103d1bd4",
+        "site_offset": "0x14",
+        "raw": "0x97fa236f"
+      },
+      {
+        "caller": "ovl_permission",
+        "caller_va": "0xffffffc0103d80e0",
+        "site_va": "0xffffffc0103d8144",
+        "site_offset": "0x64",
+        "raw": "0x97fa0a13"
+      },
+      {
+        "caller": "unix_find_other",
+        "caller_va": "0xffffffc011383be0",
+        "site_va": "0xffffffc011383c44",
+        "site_offset": "0x64",
+        "raw": "0x97bb5b53"
+      }
+    ],
+    "rejected": []
+  },
+  {
+    "family": "dpath/d_path",
+    "target": "d_path",
+    "target_va": "0xffffffc010290cf0",
+    "policy": "ALL_DIRECT_CALLERS",
+    "drift": "DRIFT_REMOVED_SITE",
+    "sites": [
+      {
+        "caller": "audit_log_d_path",
+        "caller_va": "0xffffffc010133da0",
+        "site_va": "0xffffffc010133e08",
+        "site_offset": "0x68",
+        "raw": "0x940573ba"
+      },
+      {
+        "caller": "bpf_d_path",
+        "caller_va": "0xffffffc010167b30",
+        "site_va": "0xffffffc010167b7c",
+        "site_offset": "0x4c",
+        "raw": "0x9404a45d"
+      },
+      {
+        "caller": "linker_ctx",
+        "caller_va": "0xffffffc01020c400",
+        "site_va": "0xffffffc01020c46c",
+        "site_offset": "0x6c",
+        "raw": "0x94021221"
+      },
+      {
+        "caller": "file_path",
+        "caller_va": "0xffffffc0102499d0",
+        "site_va": "0xffffffc0102499dc",
+        "site_offset": "0xc",
+        "raw": "0x94011cc5"
+      },
+      {
+        "caller": "success_walk_trace",
+        "caller_va": "0xffffffc010262510",
+        "site_va": "0xffffffc0102625dc",
+        "site_offset": "0xcc",
+        "raw": "0x9400b9c5"
+      },
+      {
+        "caller": "mnt_warn_timestamp_expiry",
+        "caller_va": "0xffffffc01027e120",
+        "site_va": "0xffffffc01027e1a8",
+        "site_offset": "0x88",
+        "raw": "0x94004ad2"
+      },
+      {
+        "caller": "seq_path",
+        "caller_va": "0xffffffc01027f260",
+        "site_va": "0xffffffc01027f2cc",
+        "site_offset": "0x6c",
+        "raw": "0x94004689"
+      },
+      {
+        "caller": "proc_pid_readlink",
+        "caller_va": "0xffffffc0102debe0",
+        "site_va": "0xffffffc0102decac",
+        "site_offset": "0xcc",
+        "raw": "0x97fec811"
+      },
+      {
+        "caller": "ext4_file_open",
+        "caller_va": "0xffffffc01030cc60",
+        "site_va": "0xffffffc01030cd88",
+        "site_offset": "0x128",
+        "raw": "0x97fe0fda"
+      },
+      {
+        "caller": "path_mount",
+        "caller_va": "0xffffffc010dfdec0",
+        "site_va": "0xffffffc010dfdf1c",
+        "site_offset": "0x5c",
+        "raw": "0x97d24b75"
+      },
+      {
+        "caller": "seq_buf_path",
+        "caller_va": "0xffffffc01157d5c0",
+        "site_va": "0xffffffc01157d604",
+        "site_offset": "0x44",
+        "raw": "0x97b44dbb"
+      }
+    ],
+    "rejected": [
+      {
+        "va": "0xffffffc010e055ac",
+        "reason": "KSU internal (ksu_wrapper_d_dname)"
+      },
+      {
+        "va": "0xffffffc010e066b0",
+        "reason": "KSU internal (ksu_mnt_ns_setns_task)"
+      },
+      {
+        "va": "0xffffffc010e09d10",
+        "reason": "KSU internal (ksu_install_rc_hook)"
+      },
+      {
+        "va": "0xffffffc010e0a6d8",
+        "reason": "KSU internal (ksu_sys_fstat)"
+      },
+      {
+        "va": "0xffffffc010e1cb2c",
+        "reason": "KSU internal (ksu_susfs_fdinfo_show)"
+      },
+      {
+        "va": "0xffffffc010e20bbc",
+        "reason": "KSU internal (ksu_nomount_build_path_from_dfd)"
+      },
+      {
+        "va": "0xffffffc010e20c44",
+        "reason": "KSU internal (ksu_nomount_build_path_from_dfd)"
+      },
+      {
+        "va": "0xffffffc010e22804",
+        "reason": "KSU internal (ksu_nomount_handle_fd_getattr)"
+      },
+      {
+        "va": "0xffffffc010e23024",
+        "reason": "KSU internal (ksu_nomount_handle_statfs_path)"
+      },
+      {
+        "va": "0xffffffc010e237b8",
+        "reason": "KSU internal (ksu_nomount_collect_ancestors)"
+      }
+    ]
+  }
+]
