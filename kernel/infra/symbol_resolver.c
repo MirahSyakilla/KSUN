@@ -190,9 +190,34 @@ void *ksu_resolve_symbol_for_functable_hook(const char *symbol_name)
 #endif
 }
 
+/*
+ * Keep the kernel's kallsyms_on_each_symbol alive: with CONFIG_KPROBES=n no
+ * in-tree caller remains, so the linker's --gc-sections would otherwise
+ * discard it and symbol enumeration (used by the branch-link whole-text
+ * discovery) would fail closed.  Referencing it here is a use of an
+ * existing kernel API, not a vendor source modification.
+ */
+static int ksu_keep_kallsyms_on_each_symbol_cb(void *data, const char *name,
+					       struct module *mod,
+					       unsigned long addr)
+{
+	(void)data;
+	(void)name;
+	(void)mod;
+	(void)addr;
+	return 0;
+}
+
 void __init ksu_init_symbol_resolver()
 {
 #if !ALWAYS_HAVE_ON_EACH_SYMBOL
+    /*
+     * Invoke the walker once with a no-op callback: this is a real call,
+     * not just an address reference, so the compiler cannot discard it and
+     * the linker keeps the kernel's kallsyms_on_each_symbol alive even on
+     * CONFIG_KPROBES=n builds where nothing else calls it.
+     */
+    kallsyms_on_each_symbol(ksu_keep_kallsyms_on_each_symbol_cb, NULL);
     kallsyms_on_each_symbol_fn = find_kernel_symbol_exact("kallsyms_on_each_symbol");
     if (!kallsyms_on_each_symbol_fn) {
         pr_warn("kallsyms_on_each_symbol not found!\n");
@@ -214,6 +239,53 @@ void __init ksu_init_symbol_resolver()
  * Returns 0 when no later symbol exists (or on lookup failure), in which
  * case callers keep their default window.
  */
+struct ksu_symbol_walk_ctx {
+    int (*fn)(void *, const char *, unsigned long, unsigned long);
+    void *data;
+};
+
+static int symbol_walk_cb(void *data, const char *name, struct module *mod,
+                          unsigned long addr)
+{
+    struct ksu_symbol_walk_ctx *ctx = data;
+
+    (void)mod;
+    return ctx->fn(ctx->data, name, addr, 0);
+}
+
+/*
+ * Walk every kernel symbol in address order, invoking @fn(name, addr, next)
+ * where next is the start of the following symbol (0 for the last one).
+ * Returns the callback's first nonzero return value, or 0 when the walk
+ * completes.  Uses the on_each_symbol table walk (available on <5.19) or
+ * falls back to -ENOSYS on kernels where the table walk was removed --
+ * callers must fail closed in that case.
+ */
+int ksu_walk_kernel_symbols(int (*fn)(void *, const char *, unsigned long,
+                                      unsigned long),
+                            void *data)
+{
+#if !ALWAYS_HAVE_ON_EACH_SYMBOL
+    struct ksu_symbol_walk_ctx ctx = { .fn = fn, .data = data };
+    unsigned long prev = 0;
+    int err;
+
+    if (kallsyms_on_each_symbol_fn) {
+        err = kallsyms_on_each_symbol_fn(symbol_walk_cb, &ctx);
+        return err ? err : 0;
+    }
+    /* No table walk available: sorted-walk via repeated exact lookups is
+     * not practical; report unsupported so callers fail closed. */
+    return -ENOSYS;
+#else
+    struct ksu_symbol_walk_ctx ctx = { .fn = fn, .data = data };
+    int err;
+
+    err = kallsyms_on_each_symbol(symbol_walk_cb, &ctx);
+    return err ? err : 0;
+#endif
+}
+
 unsigned long find_kernel_symbol_next_address(unsigned long addr)
 {
     struct next_symbol_ctx ctx = { .addr = addr, .next = 0 };

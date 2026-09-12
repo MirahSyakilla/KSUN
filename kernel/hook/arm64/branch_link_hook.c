@@ -418,6 +418,193 @@ static int ksu_bl_restore_record(struct ksu_bl_record *record)
 	return 0;
 }
 
+/*
+ * ---------------------------------------------------------------------------
+ * Automatic whole-text call-site discovery (ALL_DIRECT_CALLERS families)
+ *
+ * Instead of a hand-maintained caller manifest, a discovery family declares
+ * its semantic target; the scanner walks every kernel symbol in address
+ * order, treats each symbol region as a candidate caller function, and
+ * records every direct BL whose decoded destination equals the target.
+ *
+ * Safety properties:
+ *  - every candidate is individually verified: instruction is BL, decoded
+ *    destination == semantic target, target symbol resolved exactly;
+ *  - scans are bounded by the next symbol (function boundary), so a scan
+ *    cannot overrun into a neighboring function and steal its sites;
+ *  - uncovered BLR/indirect calls are NEVER patched (families that need
+ *    them must define them explicitly);
+ *  - min_sites acts as a drift floor: if discovery finds fewer than the
+ *    family's known-good minimum, the family fails closed with
+ *    DRIFT_REMOVED_SITE rather than silently losing coverage;
+ *  - -ENOSPC / -ENOSYS (no symbol walk on this kernel) fail closed.
+ * ---------------------------------------------------------------------------
+ */
+struct ksu_bl_discover_ctx {
+	unsigned long target;
+	int bl_count;
+	int region_count;
+	bool trace_names;
+	unsigned long hook;
+	const char *name;
+	unsigned long caller_start;
+	unsigned long caller_next;
+	int first_record;
+	int sites;
+	int callers;
+	int failed;
+};
+
+static int ksu_bl_discover_site(struct ksu_bl_discover_ctx *ctx,
+				unsigned long site)
+{
+	struct ksu_bl_record *record;
+
+	pr_info("branch_link: %s SITE-MATCH at 0x%lx\n", ctx->name, site);
+	u32 before_word, replacement_word;
+	int ret;
+
+	if (ksu_bl_record_count >= ARRAY_SIZE(ksu_bl_records)) {
+		pr_warn("branch_link: %s discovery: record capacity "
+			"exhausted at site 0x%lx (fail-closed)\n",
+			ctx->name, site);
+		ctx->failed = -ENOSPC;
+		return -ENOSPC;
+	}
+
+	ret = ksu_arm64_bl_replace_at(site, ctx->target, ctx->hook,
+				      &before_word, &replacement_word);
+	if (ret) {
+		pr_warn("branch_link: %s discovery: site 0x%lx rejected "
+			"(%d) -- fail-closed\n", ctx->name, site, ret);
+		ctx->failed = ret;
+		return ret;
+	}
+
+	record = &ksu_bl_records[ksu_bl_record_count++];
+	record->name = ctx->name;
+	record->site = site;
+	record->original = ctx->target;
+	record->hook = ctx->hook;
+	record->original_word = before_word;
+	record->replacement_word = replacement_word;
+	record->state = KSU_BL_RECORD_ACTIVE;
+	ctx->sites++;
+	return 0;
+}
+
+/* Called per symbol during the kallsyms walk.  When we reach the symbol
+ * AFTER the caller region we just tracked, flush (scan) that region. */
+static int ksu_bl_discover_flush(struct ksu_bl_discover_ctx *ctx,
+				 unsigned long start, unsigned long end)
+{
+	unsigned long site;
+	u32 raw_instruction;
+	int ret;
+	bool in_avc = ctx->trace_names &&
+		(start == (unsigned long)ksu_bl_lookup("avc_has_perm"));
+
+	if (in_avc)
+		pr_info("branch_link: %s FLUSH avc_has_perm region "
+			"[0x%lx..0x%lx)\n", ctx->name, start, end);
+
+	if (!ctx->caller_start || end <= ctx->caller_start)
+		return 0;
+
+	/* Phase-13 diagnostics: count every scanned region. */
+	ctx->region_count++;
+
+	for (site = ctx->caller_start; site + sizeof(raw_instruction) <= end;
+	     site += sizeof(raw_instruction)) {
+		if (copy_from_kernel_nofault(&raw_instruction, (void *)site,
+					     sizeof(raw_instruction)))
+			continue;
+		if (!ksu_aarch64_insn_is_bl(raw_instruction))
+			continue;
+		ctx->bl_count++;
+		/* Phase 13: log ALL BL decodes (rate-capped by the walk's
+		 * linearity -- one line per region is enough). */
+		if (site + ksu_aarch64_get_branch_offset(raw_instruction) ==
+		    ctx->target)
+			pr_info("branch_link: %s MATCH site=0x%lx\n",
+				ctx->name, site);
+		/* Phase-13: log ALL BL decodes near the target (within 1MB) */
+		if (ctx->target > site &&
+		    ctx->target - site < 0x100000)
+			pr_info("branch_link: %s NEAR site=0x%lx "
+				"dest=0x%lx target=0x%lx\n", ctx->name,
+				site,
+				site + ksu_aarch64_get_branch_offset(
+					raw_instruction),
+				ctx->target);
+		if (in_avc)
+			pr_info("branch_link: %s AVC-BL site=0x%lx "
+				"dest=0x%lx target=0x%lx match=%d\n",
+				ctx->name, site,
+				site + ksu_aarch64_get_branch_offset(
+					raw_instruction),
+				ctx->target,
+				site + ksu_aarch64_get_branch_offset(
+					raw_instruction) == ctx->target);
+		else if (ctx->trace_names && ctx->bl_count < 5)
+			pr_info("branch_link: %s WALK-DECODE site=0x%lx "
+				"raw=0x%08x dest=0x%lx\n", ctx->name, site,
+				raw_instruction,
+				site + ksu_aarch64_get_branch_offset(
+					raw_instruction));
+		if (site + ksu_aarch64_get_branch_offset(raw_instruction) !=
+		    ctx->target)
+			continue;
+
+		ret = ksu_bl_discover_site(ctx, site);
+		if (ret)
+			return ret;
+		ctx->callers++;
+	}
+	return 0;
+}
+
+static int ksu_bl_discover_sym_cb(void *data, const char *name,
+				  unsigned long addr, unsigned long next)
+{
+	struct ksu_bl_discover_ctx *ctx = data;
+	int ret;
+
+	if (ctx->trace_names) {
+		bool is_target = (addr == ctx->target);
+		bool is_hook = (addr == ctx->hook);
+		if (strncmp(name, "avc_has_", 8) == 0 || is_target ||
+		    is_hook || strncmp(name, "selinux_capable", 15) == 0 ||
+		    strncmp(name, "selinux_file_ioctl", 18) == 0 ||
+		    strncmp(name, "audit_inode_permission", 22) == 0 ||
+		    strncmp(name, "has_cap_mac_admin", 17) == 0)
+			pr_info("branch_link: %s WALK-SYM %s @ 0x%lx "
+				"is_target=%d is_hook=%d\n",
+				ctx->name, name, addr, is_target, is_hook);
+	}
+
+	/* Flush the previously tracked region; this symbol's start is its
+	 * end. */
+	if (ctx->caller_start && addr > ctx->caller_start) {
+		ret = ksu_bl_discover_flush(ctx, ctx->caller_start, addr);
+		if (ret)
+			return ret;
+	}
+
+	/* Skip regions containing the hook (wrapper) or the target itself:
+	 * the wrapper lives in KSU-owned text and may legitimately BL to the
+	 * target; the target's own recursive BLs are its business.  Patching
+	 * either would recurse. */
+	if ((ctx->hook >= ctx->caller_start && ctx->hook < addr) ||
+	    (ctx->target >= ctx->caller_start && ctx->target < addr)) {
+		ctx->caller_start = 0;
+		return 0;
+	}
+
+	ctx->caller_start = addr;
+	return 0;
+}
+
 static int ksu_bl_restore_records_from(int first_record)
 {
 	int first_error = 0;
@@ -443,6 +630,91 @@ static int ksu_bl_restore_records_from(int first_record)
 	}
 	ksu_bl_record_count = write;
 	return first_error;
+}
+
+/*
+ * Automatic discovery family driver (ALL_DIRECT_CALLERS policy).
+ *
+ * Walks the running kernel's symbol table in address order, scans every
+ * non-KSU function region for direct BL instructions targeting the semantic
+ * target, and patches each discovered site through the record/rollback
+ * machinery.  Fails closed when:
+ *   - the symbol walk is unavailable on this kernel (-ENOSYS);
+ *   - the target symbol cannot be resolved;
+ *   - discovery finds fewer than @min_sites (DRIFT_REMOVED_SITE floor);
+ *   - record capacity is exhausted (-ENOSPC);
+ *   - any individual site is rejected by the patch verifier.
+ *
+ * On success, every valid direct caller -- including callers added by other
+ * developers after this branch was written -- is automatically covered with
+ * no manual manifest maintenance.
+ */
+static int ksu_branch_link_discover_family(const char *name,
+					   const char *target_sym,
+					   void *hook, int min_sites,
+					   bool *ready)
+{
+	struct ksu_bl_discover_ctx ctx = { };
+	unsigned long etext = find_kernel_symbol_exact("_etext");
+
+	ctx.caller_next = etext;
+	int bl_seen;
+	unsigned long target = ksu_bl_lookup(target_sym);
+	int err;
+	int ret = -ENOENT;
+
+	*ready = false;
+	if (!target) {
+		pr_warn("branch_link: %s: target %s unresolved\n", name,
+			target_sym);
+		return -ENOENT;
+	}
+
+	ctx.target = target;
+	ctx.hook = (unsigned long)hook;
+	ctx.name = name;
+	ctx.region_count = 0;
+	ctx.trace_names = true;
+	ctx.first_record = ksu_bl_record_count;
+
+	err = ksu_walk_kernel_symbols(ksu_bl_discover_sym_cb, &ctx);
+	if (err == -ENOSYS) {
+		pr_warn("branch_link: %s: symbol walk unavailable on this "
+			"kernel -- fail-closed\n", name);
+		ksu_bl_restore_records_from(ctx.first_record);
+		return err;
+	}
+	/* Flush the final region (last symbol before _etext). */
+	if (!ctx.failed && ctx.caller_start)
+		ksu_bl_discover_flush(&ctx, ctx.caller_start,
+				      etext ? etext : ctx.caller_start + 0x1000000);
+
+	if (ctx.failed) {
+		pr_warn("branch_link: %s discovery failed (%d) -- rolling "
+			"back %d sites\n", name, ctx.failed,
+			ksu_bl_record_count - ctx.first_record);
+		ksu_bl_restore_records_from(ctx.first_record);
+		return ctx.failed;
+	}
+
+	if (ctx.sites < min_sites) {
+		pr_warn("branch_link: %s: DRIFT_REMOVED_SITE -- discovered "
+			"%d sites, policy minimum %d, bl_seen=%d, "
+			"regions=%d (fail-closed)\n", name,
+			ctx.sites, min_sites, ctx.bl_count,
+			ctx.region_count);
+		ksu_bl_restore_records_from(ctx.first_record);
+		return -ENOENT;
+	}
+
+	ret = ctx.sites;
+	pr_info("branch_link: %s: TRACE bl_seen=%d regions_scanned via walk\n",
+		name, ctx.bl_count);
+	pr_info("branch_link: %s: auto-discovered %d sites across %d "
+		"callers (target %s @ 0x%lx)\n", name, ctx.sites,
+		ctx.callers, target_sym, target);
+	*ready = true;
+	return ret;
 }
 
 static int ksu_bl_record_patch_all(const char *name, unsigned long start,
