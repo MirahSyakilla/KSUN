@@ -1755,14 +1755,16 @@ as generated audit artifacts. They are not production inputs.
 
 ## Git State
 
-The Phase 16 report and ignore entry are intended to be committed locally as:
+The Phase 16 report and ignore entry were first recorded locally as:
 
 ```text
-the commit that adds this report; the exact hash is recorded in the final
-post-commit verification below
+fbd00a0d docs: record Phase 16 manifest architecture blocker
 ```
 
-After that commit, the final KernelSU-Next worktree is expected to be clean. The separate parent
+The wording/provenance correction to this report is recorded in the follow-up
+commit immediately after `fbd00a0d`; the final `git log` contains both local
+commit hashes. After those commits, the final KernelSU-Next worktree is expected
+to be clean. The separate parent
 vendor repository retains its existing uncommitted:
 
 ```text
