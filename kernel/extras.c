@@ -116,23 +116,35 @@ static int get_sid()
 	return 0;
 }
 
-int ksu_handle_slow_avc_audit(u32 *tsid)
+/*
+ * Spoof the audited target SID if it belongs to a KSU root domain.
+ * Returns the (possibly rewritten) tsid; used by the branch-link
+ * slow_avc_audit wrapper (hookless) and kept free of probe assumptions.
+ */
+u32 ksu_avc_spoof_tsid(u32 tsid)
 {
-	u32 sid;
-
 	if (atomic_read(&disable_spoof))
-		return 0;
+		return tsid;
 
 	// If the audited target is a KSU root domain, replace just that SID.
-	sid = *tsid;
-	if (sid == ksu_spoof_sid || sid == su_spoof_sid) {
+	if (tsid == ksu_spoof_sid || tsid == su_spoof_sid) {
 		pr_info_ratelimited("avc_spoof/slow_avc_audit: replacing root sid: %u with priv_app_sid: %u\n",
-				    sid, priv_app_sid);
-		*tsid = priv_app_sid;
+				    tsid, priv_app_sid);
+		tsid = priv_app_sid;
 	}
 
-	return 0;
+	return tsid;
 }
+EXPORT_SYMBOL(ksu_avc_spoof_tsid);
+
+/* Gate used by the branch-link family: spoofing is armed when the feature
+ * is enabled and sids are resolved. */
+bool ksu_avc_spoof_active(void)
+{
+	return !atomic_read(&disable_spoof) &&
+	       (ksu_spoof_sid || su_spoof_sid);
+}
+EXPORT_SYMBOL(ksu_avc_spoof_active);
 
 #ifdef CONFIG_KPROBES
 #include <linux/kprobes.h>
@@ -151,10 +163,9 @@ static bool slow_avc_audit_hook_installed;
  */
 static int slow_avc_audit_pre_handler(struct kprobe *p, struct pt_regs *regs)
 {
-	if (atomic_read(&disable_spoof))
-		return 0;
-
 	/*
+	 * LEGACY kprobe path (CONFIG_KPROBES=y profiles only).  The hookless
+	 * branch-link AVC family replaces this on the target configuration.
 	 * for < 4.17 int slow_avc_audit(u32 ssid, u32 tsid
 	 * for >= 4.17 int slow_avc_audit(struct selinux_state *state, u32 ssid, u32 tsid
 	 * for >= 6.4 int slow_avc_audit(u32 ssid, u32 tsid
@@ -166,10 +177,10 @@ static int slow_avc_audit_pre_handler(struct kprobe *p, struct pt_regs *regs)
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
 	u32 *tsid = (u32 *)&PT_REGS_PARM2(regs);
-	ksu_handle_slow_avc_audit(tsid);
+	*tsid = ksu_avc_spoof_tsid(*tsid);
 #else
 	u32 *tsid = (u32 *)&PT_REGS_PARM3(regs);
-	ksu_handle_slow_avc_audit(tsid);
+	*tsid = ksu_avc_spoof_tsid(*tsid);
 #endif
 
 	return 0;
@@ -230,10 +241,12 @@ static int __ksu_avc_spoof_enable_locked(void)
 	pr_info("avc_spoof/init: slow_avc_audit spoofing enabled!\n");
 	return 0;
 #else
-	/* CONFIG_KPROBES=n: the slow_avc_audit interception does not exist in
-	 * this build.  Report accurately instead of falling through to the
-	 * "enabled" message with no mechanism behind it. */
-	pr_info("avc_spoof/init: slow_avc_audit interception not built (CONFIG_KPROBES=n): spoofing disabled\n");
+	/* CONFIG_KPROBES=n: interception is provided by the hookless
+	 * branch-link slow_avc_audit family (see hook/arm64/branch_link_hook.c).
+	 * That family registers the patch sites and advertises readiness; this
+	 * function only arms the SID spoofing state. */
+	atomic_set(&disable_spoof, 0);
+	pr_info("avc_spoof/init: hookless slow_avc_audit spoofing armed\n");
 	return 0;
 #endif
 }

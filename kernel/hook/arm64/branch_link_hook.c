@@ -27,6 +27,11 @@
 #include "infra/symbol_resolver.h"
 #include "klog.h" // IWYU pragma: keep
 #include "runtime/ksud.h"
+#if defined(CONFIG_KSU_HOOK_CORE) && defined(CONFIG_AUDIT)
+/* from extras.c: AVC audit-log SID spoofing state */
+u32 ksu_avc_spoof_tsid(u32 tsid);
+bool ksu_avc_spoof_active(void);
+#endif
 #ifdef CONFIG_KSU_HOOKLESS_SUSFS
 #ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 #include "nomount/nomount.h"
@@ -141,6 +146,7 @@ static bool ksu_bl_permission_ready;
 static bool ksu_bl_dpath_ready;
 static bool ksu_bl_getname_flags_ready;
 static bool ksu_bl_getname_kernel_ready;
+static bool ksu_bl_avc_ready;
 static bool ksu_bl_iterate_ready;
 static bool ksu_bl_stat_path_ready;
 static bool ksu_bl_stat_fd_ready;
@@ -700,7 +706,9 @@ static bool ksu_branch_link_patch_permission_family(void)
 		{ "vfs_symlink", KSU_BL_SITE_REQUIRED, 1 },
 		{ "vfs_link", KSU_BL_SITE_REQUIRED, 1 },
 		{ "do_linkat", KSU_BL_SITE_REQUIRED, 1 },
-		{ "vfs_rename", KSU_BL_SITE_REQUIRED, 3 },
+		/* AUDIT=y grows vfs_rename; the third site sits +0x444 in
+		 * (next symbol +0x470), past the default 0x400 window. */
+		{ "vfs_rename", KSU_BL_SITE_REQUIRED, 3, 0x470 },
 		{ "vfs_whiteout", KSU_BL_SITE_REQUIRED, 1 },
 		{ "link_path_walk", KSU_BL_SITE_REQUIRED, 2 },
 		{ "may_open", KSU_BL_SITE_REQUIRED, 1 },
@@ -872,6 +880,86 @@ static bool ksu_branch_link_patch_dpath_family(void)
 static void ksu_branch_link_dpath_retire_probe(void)
 {
 	ksu_nomount_dpath_kretprobe_retire();
+}
+
+/*
+ * AVC audit-log family (hookless migration of the slow_avc_audit kprobe).
+ *
+ * The old implementation was a symbol-scoped kprobe pre-handler on
+ * slow_avc_audit() that rewrote the tsid ARGUMENT in the saved registers
+ * before the original body ran: if the audited target SID belonged to a KSU
+ * root domain, it was replaced with a priv_app SID, so the emitted audit
+ * record showed a priv_app tcontext instead of the root domain.  The original
+ * body always ran afterwards, and enforcement decisions are unaffected --
+ * slow_avc_audit() only formats/emits audit output (it is called from
+ * avc_has_perm*() after the permission decision).
+ *
+ * The hookless equivalent is a call-site wrapper with the same ABI as
+ * slow_avc_audit(): munge the tsid argument, call the original, return its
+ * result.  That reproduces the pre-handler semantics exactly (argument
+ * mutation before body execution) without any probe machinery.
+ *
+ * Requires CONFIG_AUDIT=y: with CONFIG_AUDIT=n the symbol does not exist and
+ * there is no audit output to spoof -- the family is absent by design.
+ */
+static int (*slow_avc_audit_fn)(void *, u32, u32, u16, u32, u32, u32, int,
+				void *);
+
+static int __nocfi ksu_do_slow_avc_audit(void *state, u32 ssid, u32 tsid,
+					 u16 tclass, u32 requested,
+					 u32 audited, u32 denied, int result,
+					 void *a)
+{
+	int (*orig)(void *, u32, u32, u16, u32, u32, u32, int, void *);
+	int ret;
+
+	orig = READ_ONCE(slow_avc_audit_fn);
+	if (unlikely(!orig))
+		return -EOPNOTSUPP;
+	if (ksu_avc_spoof_active())
+		tsid = ksu_avc_spoof_tsid(tsid);
+	ret = orig(state, ssid, tsid, tclass, requested, audited, denied,
+		   result, a);
+	return ret;
+}
+
+static bool ksu_branch_link_patch_avc_family(void)
+{
+	static const struct ksu_bl_manifest_caller callers[] = {
+		/* Every compiled call site of slow_avc_audit in the
+		 * AUDIT=y lisa image; the old kprobe was symbol-scoped
+		 * and fired on all of them, so all are REQUIRED. */
+		{ "avc_has_extended_perms", KSU_BL_SITE_REQUIRED, 1 },
+		{ "avc_has_perm", KSU_BL_SITE_REQUIRED, 1 },
+		{ "avc_has_perm_flags", KSU_BL_SITE_REQUIRED, 1 },
+		{ "selinux_capable", KSU_BL_SITE_REQUIRED, 1 },
+		{ "selinux_file_ioctl", KSU_BL_SITE_REQUIRED, 1 },
+		{ "audit_inode_permission", KSU_BL_SITE_REQUIRED, 1 },
+		{ "has_cap_mac_admin", KSU_BL_SITE_REQUIRED, 1 },
+	};
+	unsigned long target = ksu_bl_lookup("slow_avc_audit");
+	unsigned int found = 0;
+	unsigned int patched = 0;
+	bool ready;
+	int count;
+
+	WRITE_ONCE(slow_avc_audit_fn,
+		   (void *)ksu_bl_lookup_canonical("slow_avc_audit"));
+	count = ksu_bl_record_patch_manifest(
+		"avc/slow_avc_audit", callers, ARRAY_SIZE(callers), target,
+		(unsigned long)ksu_do_slow_avc_audit, &found, &patched);
+	pr_info("branch_link: avc profile=%s family=%u/%u sites=%d\n",
+		"lisa-5.4-audit", patched, found, count);
+	ready = target && count > 0 && found == patched;
+	if (!ready) {
+		if (ksu_bl_records_all_restored())
+			WRITE_ONCE(slow_avc_audit_fn, NULL);
+		else
+			pr_warn("branch_link: avc family failed with "
+				"unrestorable sites; wrapper stays bound to "
+				"original\n");
+	}
+	return ready;
 }
 
 /*
@@ -2517,6 +2605,21 @@ int ksu_branch_link_patch_init(void)
 	}
 #endif
 
+#ifdef CONFIG_KSU_HOOK_CORE
+#ifdef CONFIG_AUDIT
+	{
+		bool avc_ready = ksu_branch_link_patch_avc_family();
+
+		ksu_bl_avc_ready = avc_ready;
+		/* Fail-closed: on manifest miss the family rolls back and the
+		 * wrapper slot stays bound to the original; AVC spoofing is
+		 * then simply inactive (audit output unmodified).  Arming of
+		 * the SID state is handled by the existing avc_spoof feature
+		 * lifecycle (ksu_avc_spoof_enable/late_init in extras.c). */
+	}
+#endif
+#endif
+
 #ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	{
 		bool flags_ready = ksu_branch_link_patch_getname_flags_family();
@@ -2765,11 +2868,11 @@ int ksu_branch_link_patch_init(void)
 	if (ksu_susfs_mntns_get_runtime_ready())
 		ksu_susfs_disable_mntns_probe_fallback();
 	pr_info("branch_link: readiness faccess=%d readlink=%d permission=%d "
-		"dpath=%d gname-flags=%d gname-kernel=%d iterate=%d "
+		"dpath=%d avc=%d gname-flags=%d gname-kernel=%d iterate=%d "
 		"stat-path=%d stat-fd=%d statfs=%d exec=%d mount=%d "
 		"records=%d\n",
 		ksu_bl_faccessat_ready, ksu_bl_readlink_ready,
-		ksu_bl_permission_ready, ksu_bl_dpath_ready,
+		ksu_bl_permission_ready, ksu_bl_dpath_ready, ksu_bl_avc_ready,
 		ksu_bl_getname_flags_ready, ksu_bl_getname_kernel_ready,
 		ksu_bl_iterate_ready, ksu_bl_stat_path_ready,
 		ksu_bl_stat_fd_ready, ksu_bl_statfs_ready, ksu_bl_exec_ready,

@@ -16,6 +16,7 @@ TOTAL_PASS=0; TOTAL_FAIL=0; TOTAL_SKIP=0
 
 for test in \
 	test_branch_link_inventory.sh \
+	test_avc_spoof.sh \
 	test_compat_table_invariant.sh \
 	test_permission_lifetime.sh \
 	test_signal_namespace_race.sh \
