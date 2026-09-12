@@ -1761,10 +1761,13 @@ The Phase 16 report and ignore entry were first recorded locally as:
 fbd00a0d docs: record Phase 16 manifest architecture blocker
 ```
 
-The wording/provenance correction to this report is recorded in the follow-up
-commit immediately after `fbd00a0d`; the final `git log` contains both local
-commit hashes. After those commits, the final KernelSU-Next worktree is expected
-to be clean. The separate parent
+The wording/provenance correction to this report is recorded as:
+
+```text
+08bb1c9d docs: correct Phase 16 report provenance
+```
+
+After those commits, the final KernelSU-Next worktree is clean. The separate parent
 vendor repository retains its existing uncommitted:
 
 ```text
