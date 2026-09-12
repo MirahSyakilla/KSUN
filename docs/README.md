@@ -44,11 +44,11 @@ module ABI version `13`.
 ## Project status
 
 - Hookless SUSFS (`sus_path`, `open_redirect`, `sus_mount`, `sus_kstat`, `sus_map`,
-  `spoof_cmdline_or_bootconfig`, `spoof_uname`, `avc_log_spoofing` — the last one only on kernels with
-  `CONFIG_AUDIT=y`, where it is implemented as a single-site branch-link
-  rewrite of the compiled `slow_avc_audit()` call; the common
-  `CONFIG_AUDIT=n` configuration has no AVC audit path to spoof and the
-  feature is absent by design).
+  `spoof_cmdline_or_bootconfig`, `spoof_uname`, `avc_log_spoofing` — the last one requires
+  `CONFIG_AUDIT=y` (the common `CONFIG_AUDIT=n` configuration has no AVC
+  audit path to spoof and the feature is absent by design) and is
+  implemented as a 7-callsite branch-link rewrite of the compiled
+  `slow_avc_audit()` callers; runtime validated on the reference device).
 - Hookless NoMount (path redirection, whiteouts, synthetic directories, UID blocking,
   packed netlink ABI).
 - Syscall-table tampering, native and AArch32 compat.
@@ -194,8 +194,8 @@ hookless SUSFS/NoMount runtimes.
 | Kernel | Status | Notes |
 |---|---|---|
 | **5.4 (ARM64, stock-style)** | **Validated** | Live-device validated end-to-end on a stock-style 5.4.302 Android ARM64 kernel: full deterministic suite, AArch32 compat, long-duration soak, adversarial review. This is the reference target. |
-| **4.19 (ARM64, stock-style)** | **Supported with required integration/backports** | The Kconfig/build probes and the legacy compatibility paths target 4.19, but stock 4.19 lacks several APIs the runtimes use — notably the modern `vfs_create_mount()` API used by the SUSFS mount runtime paths (added in 5.x). A 4.19 build requires resolving those API gaps (backport or alternative path) and is **not live-device validated** from this branch. |
-| **4.9** | **Experimental / unvalidated** | Compatibility shims exist (linked-list VMAs, old page walker, flex arrays, raw-argument syscall table, list-based LSM hooks), but the combination is not live-device validated and additionally requires syscall tracepoints and the Android vendor interfaces consumed by `KSU_HOOK_CORE`. |
+| **4.19 (ARM64, stock-style)** | **Untested, likely missing API** | The Kconfig/build probes and the legacy compatibility paths target 4.19, but stock 4.19 lacks several APIs the runtimes use — notably the modern `vfs_create_mount()` API used by the SUSFS mount runtime paths (added in 5.x). A 4.19 build requires resolving those API gaps (backport or alternative path) and is **not live-device validated** from this branch. |
+| **4.9** | **Untested, likely missing API** | Compatibility shims exist (linked-list VMAs, old page walker, flex arrays, raw-argument syscall table, list-based LSM hooks), but the combination is not live-device validated and additionally requires syscall tracepoints and the Android vendor interfaces consumed by `KSU_HOOK_CORE`. |
 | **3.10 / 3.18** | **Unsupported** by hookless SUSFS | Predate several required VFS and KSU hook interfaces. |
 
 Architecture: the branch-link scanner, syscall-table tamper, and NoMount are
