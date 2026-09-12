@@ -20,3 +20,5 @@ validation/audit/phase12/
 validation/audit/phase12/
 validation/audit/phase13/
 target
+tools/bl-analyzer/generated_manifest.h
+tools/bl-analyzer/generated_manifest.json
