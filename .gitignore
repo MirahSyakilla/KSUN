@@ -25,3 +25,12 @@ target
 tools/bl-analyzer/generated_manifest.h
 tools/bl-analyzer/generated_manifest.json
 __pycache__/
+validation/audit/phase17/det1.json
+validation/audit/phase17/det2.json
+validation/audit/phase17/pos_manifest.json
+validation/audit/phase17/pos_rows.h
+validation/audit/phase17/stale.json
+validation/audit/phase17/t.err
+validation/audit/phase17/t.out
+validation/audit/phase17/trunc.map
+validation/audit/phase17/fixtures/

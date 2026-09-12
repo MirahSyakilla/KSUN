@@ -173,10 +173,15 @@ See section below (final commit listing). Worktree clean. **No push.**
 
 ---
 
-## Git (filled at commit)
+## Git (final)
 
 ```text
-<HEAD recorded in final verification below>
+7b2630f3 tools: add fail-closed BL analyzer v2 with source-owned policy
 ```
+
+The test-residue ignore entries were recorded in the follow-up commit
+immediately after `7b2630f3`.  After those commits the KernelSU-Next worktree
+is clean; the separate parent vendor repository retains its pre-existing
+`arch/arm64/configs/lisa_defconfig` modification (untouched).
 
 **NO PUSH PERFORMED.**
