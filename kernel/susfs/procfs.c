@@ -812,7 +812,7 @@ static int ksu_susfs_visible_mnt_id(struct mount *mnt)
 	return mnt_id;
 }
 
-static bool ksu_susfs_mount_hide_view_enabled(void)
+bool ksu_susfs_mount_hide_view_enabled(void)
 {
 	if (!static_branch_unlikely(&ksu_susfs_mount_hide_enabled)) {
 		return false;
@@ -1143,11 +1143,37 @@ static int ksu_susfs_mntns_get_handler(struct kretprobe_instance *ri,
 }
 #endif
 
+
+/* Phase 21: module mount source-path filter.
+ * Module bind mounts have source paths containing /adb/modules/ (the
+ * module manager creates them in the root namespace during post-fs-data).
+ * They are not in the auto-hide marking set because they were mounted
+ * before the susfs filter was ever enabled.  Hide them from non-root
+ * readers by source-path check, preserving the security objective
+ * regardless of when the mounts were created. */
+static bool ksu_susfs_is_module_source(struct mount *mnt)
+{
+	char buf[256];
+	char *path;
+	struct vfsmount *vmnt = &mnt->mnt;
+
+	if (!vmnt || !vmnt->mnt_root)
+		return false;
+	path = dentry_path_raw(vmnt->mnt_root, buf, sizeof(buf));
+	if (IS_ERR_OR_NULL(path))
+		return false;
+	/* Check for /adb/ or /modules/ in the source root path */
+	return strstr(path, "/adb/") != NULL ||
+	       strstr(path, "/modules/") != NULL;
+}
+
+
 static int ksu_susfs_show_vfsmnt(struct seq_file *m, struct vfsmount *mnt)
 {
 	struct mount *r = real_mount(mnt);
 
-	if (ksu_susfs_mount_hidden_or_ancestor(r)) {
+	if (ksu_susfs_mount_hidden_or_ancestor(r) ||
+	    ksu_susfs_is_module_source(r)) {
 		return 0;
 	}
 
@@ -1162,7 +1188,8 @@ static int ksu_susfs_show_mountinfo(struct seq_file *m, struct vfsmount *mnt)
 {
 	struct mount *r = real_mount(mnt);
 
-	if (ksu_susfs_mount_hidden_or_ancestor(r)) {
+	if (ksu_susfs_mount_hidden_or_ancestor(r) ||
+	    ksu_susfs_is_module_source(r)) {
 		return 0;
 	}
 
@@ -1177,7 +1204,8 @@ static int ksu_susfs_show_vfsstat(struct seq_file *m, struct vfsmount *mnt)
 {
 	struct mount *r = real_mount(mnt);
 
-	if (ksu_susfs_mount_hidden_or_ancestor(r)) {
+	if (ksu_susfs_mount_hidden_or_ancestor(r) ||
+	    ksu_susfs_is_module_source(r)) {
 		return 0;
 	}
 

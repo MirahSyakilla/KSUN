@@ -30,6 +30,7 @@
 #include "klog.h" // IWYU pragma: keep
 #include "ksu.h"
 #include "nomount/nomount.h"
+#include "../susfs/procfs.h"
 #include "susfs/compat.h"
 #include "susfs/susfs.h"
 
@@ -3195,6 +3196,59 @@ static bool ksu_nomount_emit_internal_dots(struct dir_context *ctx,
 	return true;
 }
 
+/* Phase 21: /dev/pts readdir filter.
+ * Non-root readers of /dev/pts must not see root-owned (uid 0) PTY
+ * entries.  Uses the existing iterate_dir BL replacement: a devpts-
+ * scoped proxy actor that drops i_uid == 0 emissions for non-root
+ * callers.  ptmx (i_ino == 2) and "." / ".." are exempted.
+ * Scoped by DEVPTS_SUPER_MAGIC so other filesystems are unaffected. */
+
+#include <uapi/linux/magic.h>
+
+struct ksu_devpts_filter_ctx {
+	struct dir_context ctx;
+	struct dir_context *orig;
+	struct dentry *dir;
+	bool active;
+};
+
+static KSU_SUSFS_ACTOR_RET ksu_devpts_filter_actor(
+	struct dir_context *ctx, const char *name, int namelen,
+	loff_t offset, u64 ino, unsigned int d_type)
+{
+	struct ksu_devpts_filter_ctx *fctx =
+		container_of(ctx, struct ksu_devpts_filter_ctx, ctx);
+	struct dentry *child;
+	struct inode *child_inode;
+
+	/* "." and ".." always visible */
+	if (namelen <= 2 && (namelen == 1 || name[0] == '.'))
+		goto emit;
+
+	/* ptmx always visible (i_ino == 2 in devpts) */
+	if (ino == 2)
+		goto emit;
+
+	/* Look up the child dentry to get its inode's uid */
+	if (!fctx->dir || !fctx->dir->d_inode)
+		goto emit;
+	child = d_lookup(fctx->dir, &(struct qstr){ .name = name,
+						    .len = namelen });
+	if (IS_ERR_OR_NULL(child))
+		goto emit;
+	child_inode = d_backing_inode(child);
+	if (child_inode && uid_eq(READ_ONCE(child_inode->i_uid),
+				  GLOBAL_ROOT_UID)) {
+		dput(child);
+		return KSU_SUSFS_ACTOR_CONTINUE;  /* hide root-owned PTY */
+	}
+	dput(child);
+
+emit:
+	return fctx->orig->actor(fctx->orig, name, namelen, offset,
+				 ino, d_type);
+}
+
 int ksu_nomount_handle_iterate_dir(struct file *file,
 				   struct dir_context *ctx)
 {
@@ -3207,6 +3261,26 @@ int ksu_nomount_handle_iterate_dir(struct file *file,
 	loff_t old_pos = ctx->pos;
 	loff_t magic = ksu_nomount_magic_pos();
 	int ret;
+
+#ifdef CONFIG_KSU_PHASE21_DEVPTS_FILTER
+	/* Phase 21: /dev/pts readdir filter — hide root-owned PTYs from
+	 * non-root readers.  Scoped by DEVPTS_SUPER_MAGIC and the SUSFS
+	 * mount-view gate (app-UID + umount-list readers only). */
+	if (inode->i_sb->s_magic == DEVPTS_SUPER_MAGIC &&
+	    ksu_susfs_mount_hide_view_enabled()) {
+		struct ksu_devpts_filter_ctx dctx;
+
+		memset(&dctx, 0, sizeof(dctx));
+		dctx.ctx.actor = ksu_devpts_filter_actor;
+		dctx.ctx.pos = ctx->pos;
+		dctx.orig = ctx;
+		dctx.dir = file->f_path.dentry;
+		dctx.active = true;
+		ret = ksu_nomount_call_real_iterate(file, &dctx.ctx);
+		ctx->pos = dctx.ctx.pos;
+		return ret;
+	}
+#endif
 
 	children = ksu_nomount_get_children_for_inode(
 		inode, &internal, &visible_ino, &parent_visible_ino);

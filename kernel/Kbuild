@@ -288,6 +288,7 @@ endif
 endif
 
 ifeq ($(CONFIG_KSU_HOOKLESS_NOMOUNT),y)
+ccflags-y += -DCONFIG_KSU_PHASE21_DEVPTS_FILTER=1
 kernelsu-objs += nomount/core.o
 kernelsu-objs += nomount/hooks.o
 kernelsu-objs += nomount/netlink.o
