@@ -49,10 +49,20 @@ bool ksu_avc_spoof_active(void);
  * Record capacity must cover every manifest family's worst-case site count
  * (core hook families + stat/exec/mount/susfs routes).  The historical 96
  * cap for 6.6+ predates the expanded families and structurally guaranteed
- * -ENOSPC fail-closed cascades; 160 covers the audited census (148 live on
- * the reference 5.4 profile) with headroom on either kernel generation.
+ * -ENOSPC fail-closed cascades; 160 covered the audited census (155 live on
+ * the reference 5.4 profile with CONFIG_AUDIT=y).  Phase 18 adopts the six
+ * previously-acknowledged census gaps (audit_log_d_path, the stat64/lstat64
+ * and compat newstat/newlstat vfs_statx callers, and the do_filp_open
+ * helpers do_open_execat/file_open_name), bringing the reference census to
+ * 162; 176 keeps ~9% headroom for multi-site row growth under other
+ * compiler shapes.  bl_policy.py:MAX_RECORDS must be kept in lockstep --
+ * the offline analyzer hard-fails on divergence.
  */
-#define KSU_BL_MAX_RECORDS 160
+#define KSU_BL_MAX_RECORDS 176
+/* Max distinct targets a single routes/exec transaction can bind fn_slots
+ * for (stat-path 2, stat-fd 2, open-scope 1, legacy exec 2).  The slot
+ * rollback stack in ksu_bl_record_patch_routes() is sized from this. */
+#define KSU_BL_MAX_ROUTE_TARGETS 4
 #define KSU_AARCH64_BL_OPCODE 0x94000000U
 #define KSU_AARCH64_BL_MASK 0xfc000000U
 #define KSU_AARCH64_BRANCH_IMM_MASK 0x03ffffffU
@@ -1082,12 +1092,14 @@ static bool ksu_branch_link_patch_dpath_family(void)
 {
 	/*
 	 * Caller list derived from the v2.02-test6 Image (20 BL sites to
-	 * d_path @ 0xffffffc010287300, 19 unique callers).  Ownership is by
-	 * the kallsyms region containing each site: the weak KSU path_mount
-	 * shim owns the site that nearest-t attribution mislabels as
-	 * ksu_kernel_write_compat.  The kretprobe was symbol-based and fired
-	 * on every site, so all sites are REQUIRED: omitting one would be a
-	 * coverage change.  A missed caller fails the family closed and the
+	 * d_path @ 0xffffffc010287300, 19 unique callers; Phase 18 adds
+	 * audit_log_d_path under CONFIG_AUDIT=y for 21 sites).  Ownership is
+	 * by the kallsyms region containing each site: the weak KSU
+	 * path_mount shim owns the site that nearest-t attribution mislabels
+	 * as ksu_kernel_write_compat.  The kretprobe was symbol-based and
+	 * fired on every site, so all sites are REQUIRED: omitting one would
+	 * be a coverage change.  A missed caller fails the family closed and
+	 * the
 	 * kretprobe stays live.
 	 */
 	static const struct ksu_bl_manifest_caller callers[] = {
@@ -1124,6 +1136,11 @@ static bool ksu_branch_link_patch_dpath_family(void)
 		{ "ksu_nomount_collect_ancestors", KSU_BL_SITE_REQUIRED, 1 },
 		/* trace seq_buf path formatter. */
 		{ "seq_buf_path", KSU_BL_SITE_REQUIRED, 1 },
+		/* AUDIT=y audit record path formatter (Phase 18 adoption: the
+		 * old symbol-scoped d_path kretprobe fired on this site too;
+		 * the wrapper's bypass/task gates keep the result unmodified
+		 * for KSU-internal and audit-context callers). */
+		{ "audit_log_d_path", KSU_BL_SITE_REQUIRED, 1 },
 	};
 	unsigned long target = ksu_bl_lookup("d_path");
 	unsigned int found = 0;
@@ -1399,6 +1416,15 @@ static int ksu_bl_record_patch_routes(
 	int failure = -ENOENT;
 	size_t i;
 
+	/* Slots touched by candidates during this transaction, with the values
+	 * they held before we bound them.  A rejected candidate (or a failed
+	 * route) must undo its slot binding exactly like its text records;
+	 * otherwise a stale fn_slot keeps pointing at a target whose patch was
+	 * rolled back.  Bounded by target_count (<= 2-3 today). */
+	unsigned long prev_slots[KSU_BL_MAX_ROUTE_TARGETS];
+	unsigned long *prev_slot_refs[KSU_BL_MAX_ROUTE_TARGETS];
+	size_t prev_slot_count = 0;
+
 	for (i = 0; i < caller_count; i++) {
 		const struct ksu_bl_manifest_caller *caller = &callers[i];
 		unsigned long caller_addr;
@@ -1428,10 +1454,19 @@ static int ksu_bl_record_patch_routes(
 		for (t = 0; t < target_count; t++) {
 			unsigned long target = ksu_bl_lookup(targets[t].name);
 			unsigned long canonical;
+			unsigned long prev_slot;
+			int cand_first = ksu_bl_record_count;
 			int sites;
 
 			if (!target)
 				continue;
+			if (prev_slot_count < ARRAY_SIZE(prev_slots)) {
+				prev_slot_refs[prev_slot_count] =
+					targets[t].fn_slot;
+				prev_slot = READ_ONCE(*targets[t].fn_slot);
+				prev_slots[prev_slot_count] = prev_slot;
+				prev_slot_count++;
+			}
 			/* Bind the original helper slot before the first text
 			 * patch: stop_machine() releases other CPUs before the
 			 * patch returns, so publishing afterwards would leave a
@@ -1456,6 +1491,13 @@ static int ksu_bl_record_patch_routes(
 				satisfied = true;
 				break;
 			}
+			/* Candidate rejected: undo its text records FIRST, then
+			 * its slot binding (reverse of install order), so no
+			 * live site can observe a stale/NULL slot while its
+			 * records are still patched to the rejected wrapper. */
+			ksu_bl_restore_records_from(cand_first);
+			WRITE_ONCE(*targets[t].fn_slot, prev_slot);
+			prev_slot_count--;
 		}
 		if (satisfied) {
 			if (caller->classification == KSU_BL_SITE_REQUIRED) {
@@ -1492,6 +1534,19 @@ failed:
 	if (required_patched)
 		*required_patched = patched;
 	ksu_bl_restore_records_from(first_record);
+	/* Text is rolled back; now undo every slot still bound by this
+	 * transaction.  Only drop a slot to its pre-transaction value when all
+	 * text records were restored: if a restore hit a CONFLICT, live sites
+	 * may still branch into the wrapper and the slot must keep pointing at
+	 * the original (wrapper then behaves as if uninstalled). */
+	if (ksu_bl_records_all_restored()) {
+		while (prev_slot_count)
+			WRITE_ONCE(*prev_slot_refs[--prev_slot_count],
+				   prev_slots[prev_slot_count]);
+	} else {
+		pr_warn("branch_link: %s rollback left unrestorable sites; "
+			"slots stay bound to original\n", name);
+	}
 	return failure;
 }
 
@@ -2075,6 +2130,18 @@ static bool ksu_branch_link_patch_stat_path_family(void)
 #ifdef CONFIG_COMPAT
 		{ "__arm64_compat_sys_newfstatat", KSU_BL_SITE_UNSUPPORTED, 0 },
 #endif
+		/* Phase 18 adoption: old-stat/compat wrappers DO hold direct
+		 * vfs_statx sites on this image (stat64 +0x54, lstat64 +0x54,
+		 * compat newstat/newlstat likewise); the earlier comment
+		 * claiming otherwise was wrong.  The symbol-scoped
+		 * vfs_getattr_nosec kretprobe covered these callers before,
+		 * so the stat-path wrapper must own them too. */
+		{ "__arm64_sys_stat64", KSU_BL_SITE_REQUIRED, 1 },
+		{ "__arm64_sys_lstat64", KSU_BL_SITE_REQUIRED, 1 },
+#ifdef CONFIG_COMPAT
+		{ "__arm64_compat_sys_newstat", KSU_BL_SITE_REQUIRED, 1 },
+		{ "__arm64_compat_sys_newlstat", KSU_BL_SITE_REQUIRED, 1 },
+#endif
 	};
 	struct ksu_bl_manifest_target targets[] = {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
@@ -2088,11 +2155,10 @@ static bool ksu_branch_link_patch_stat_path_family(void)
 	unsigned int patched = 0;
 	int sites;
 
-	/* AArch32 stat(106)/lstat(107)/stat64(195)/lstat64(196) have no
-	 * stat-path BL site on legacy shapes (vfs_stat/vfs_lstat are inline
-	 * and vfs_statx collapses into user_path_at_empty + vfs_getattr).
-	 * Those routes stay covered by the NoMount/SUSFS vfs_getattr_nosec
-	 * return probe, which remains mandatory. */
+	/* The Phase 12-era comment here claimed the stat64/lstat64 wrappers
+	 * have no stat-path BL site; the Phase 17 census disproved that, and
+	 * the wrappers are now REQUIRED rows above (old probe was
+	 * symbol-scoped and covered them). */
 	sites = ksu_bl_record_patch_routes(
 		"stat-path", callers, ARRAY_SIZE(callers), targets,
 		ARRAY_SIZE(targets), &found, &patched);
@@ -2522,6 +2588,10 @@ static bool ksu_branch_link_patch_susfs(void)
 		 * entry may be REQUIRED unconditionally. */
 		{ "do_sys_openat2", KSU_BL_SITE_REQUIRED, 1 },
 		{ "do_sys_open", KSU_BL_SITE_OPTIONAL, 1 },
+		/* Phase 18 adoption: same open-helper sites as the legacy
+		 * profile below; the old symbol-scoped probe covered them. */
+		{ "do_open_execat", KSU_BL_SITE_REQUIRED, 1 },
+		{ "file_open_name", KSU_BL_SITE_REQUIRED, 1 },
 	};
 #else
 	static const struct ksu_bl_manifest_caller do_filp_open_callers[] = {
@@ -2532,6 +2602,14 @@ static bool ksu_branch_link_patch_susfs(void)
 		 * backport that adds it without openat2.h is out of profile. */
 		{ "do_sys_open", KSU_BL_SITE_REQUIRED, 1 },
 		{ "do_sys_openat2", KSU_BL_SITE_UNSUPPORTED, 0 },
+		/* Phase 18 adoption: the open-helper family also holds direct
+		 * do_filp_open sites on this image (do_open_execat +0x7c,
+		 * file_open_name +0xf8); the old symbol-scoped probe covered
+		 * them.  open_execat is the execve(2)/execveat(2) pathname
+		 * entry, file_open_name the kernel-internal named-open
+		 * helper; both flow through the same redirect wrapper. */
+		{ "do_open_execat", KSU_BL_SITE_REQUIRED, 1 },
+		{ "file_open_name", KSU_BL_SITE_REQUIRED, 1 },
 	};
 #endif
 	static const struct ksu_bl_manifest_caller vfs_create_mount_callers[] = {
@@ -2548,6 +2626,21 @@ static bool ksu_branch_link_patch_susfs(void)
 		{ "__se_sys_fsmount", KSU_BL_SITE_OPTIONAL, 1 },
 #endif
 		{ "fuse_dentry_automount", KSU_BL_SITE_OPTIONAL, 1 },
+		/* Phase 18: explicitly out of profile (see the comment below);
+		 * the row is present so the census-vs-policy audit sees the
+		 * decision instead of an unaccounted site. */
+		{ "vfs_kern_mount", KSU_BL_SITE_UNSUPPORTED, 0 },
+		/* vfs_kern_mount is EXPLICITLY OUT OF PROFILE (Phase 18): it
+		 * holds a live vfs_create_mount BL on this image, but it is an
+		 * internal multi-mount helper whose readiness would gate the
+		 * whole atomic mount trio on an LTO-fragile symbol, and its
+		 * fc_mount-like callers are already covered by the fc_mount
+		 * row.  The old symbol-scoped vfs_create_mount kretprobe did
+		 * fire here, so this is a known, documented behavior change
+		 * versus the pre-branch-link probe profile -- accepted because
+		 * vfs_kern_mount is not on any app-reachable mount path this
+		 * feature must police.  If that assumption ever breaks, add
+		 * the row and re-verify the mount group budget. */
 	};
 	static const struct ksu_bl_manifest_caller clone_mnt_callers[] = {
 		{ "mnt_clone_internal", LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0) ?

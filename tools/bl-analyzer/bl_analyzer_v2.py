@@ -671,9 +671,13 @@ def analyze(args):
             found = by_caller.get(pc.name, [])
             n = len(found)
             if pc.classification == P.UNSUPPORTED:
-                if n:
+                if n and not pc.explicitly_excluded:
                     route_fail.append(
                         "unsupported caller %s has %d sites" % (pc.name, n))
+                elif n and pc.explicitly_excluded:
+                    log("INFO %s/%s: %d census site(s) at explicitly "
+                        "out-of-profile caller %s (documented decision)"
+                        % (route.id, pc.classification, n, pc.name))
                 rows.append({
                     "caller": pc.name, "classification": pc.classification,
                     "min_sites": 0, "width": 0, "sites": n,

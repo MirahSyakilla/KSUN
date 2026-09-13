@@ -1,0 +1,7 @@
+bl_analyzer: WARN stat-fd: census callers without policy rows (acknowledged coverage gap): exportfs_get_name
+bl_analyzer: INFO susfs/vfs_create_mount/unsupported: 1 census site(s) at explicitly out-of-profile caller vfs_kern_mount (documented decision)
+bl_analyzer: WARN execve: census callers without policy rows (acknowledged coverage gap): call_usermodehelper_exec_async, do_execve, do_execve_file, run_init_process
+bl_analyzer: WARN execveat: census callers without policy rows (acknowledged coverage gap): do_execve, do_execve_file
+bl_analyzer: WARN compat_execve: census callers without policy rows (acknowledged coverage gap): do_execve, do_execve_file
+bl_analyzer: WARN compat_execveat: census callers without policy rows (acknowledged coverage gap): do_execve, do_execve_file
+bl_analyzer: OK: 22 routes, 162 sites, payload 7727a120c0d59204

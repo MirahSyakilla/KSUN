@@ -46,6 +46,8 @@ class Caller:
     owner: str = KERNEL
     cond: str = ""                 # empty = unconditional
     acknowledged: bool = False     # True: known census/runtime gap; advisory only
+    explicitly_excluded: bool = False  # True: UNSUPPORTED with live census sites
+                                       # is an explicit documented decision
     note: str = ""
 
 
@@ -169,7 +171,7 @@ ROUTES: List[Route] = [
         id="dpath/d_path", kind="manifest",
         cond="CONFIG_KSU_HOOKLESS_NOMOUNT", group="dpath",
         profile="lisa-5.4",
-        census_expected_sites=21,  # 20 runtime + audit_log_d_path (CONFIG_AUDIT=y)
+        census_expected_sites=21,  # 20 original + audit_log_d_path
         ksu_internal="explicit",
         targets=(Target("d_path", "ksu_do_dpath", "d_path_fn"),),
         callers=(
@@ -194,9 +196,8 @@ ROUTES: List[Route] = [
             Caller("ksu_nomount_collect_ancestors", REQUIRED, 1, owner=KSU),
             Caller("seq_buf_path", REQUIRED, 1),
             Caller("audit_log_d_path", REQUIRED, 1, cond="CONFIG_AUDIT",
-                   acknowledged=True,
-                   note="CONFIG_AUDIT=y census site absent from the lisa-5.4 "
-                        "runtime array; acknowledged Phase 17 gap"),
+                   note="Phase 18 ADOPTED: old symbol-scoped d_path kretprobe "
+                        "fired here; runtime array now carries this row"),
         ),
     ),
     # -- AVC ------------------------------------------------------------------
@@ -290,7 +291,6 @@ ROUTES: List[Route] = [
         id="stat-path", kind="routes", group="stat-path",
         profile="lisa-5.4",
         census_expected_sites=7,
-        acknowledge_unlisted=True,
         targets=(
             Target("vfs_fstatat", "ksu_vfs_fstatat", "vfs_fstatat_fn",
                    cond="kver >= KV(5, 10, 0)"),
@@ -302,18 +302,18 @@ ROUTES: List[Route] = [
             Caller("__arm64_sys_statx", REQUIRED, 1, cond="__NR_statx"),
             Caller("__arm64_compat_sys_newfstatat", UNSUPPORTED, 0,
                    cond="CONFIG_COMPAT"),
-            # Phase 16 census found additional live vfs_statx callers that the
-            # runtime stat-path manifest does not cover.  Acknowledged gaps:
-            Caller("__arm64_sys_stat64", REQUIRED, 1, acknowledged=True,
-                   note="Phase16 census: live vfs_statx site, runtime "
-                        "stat-path manifest lacks this row (compat/old-stat "
-                        "coverage gap)"),
-            Caller("__arm64_sys_lstat64", REQUIRED, 1, acknowledged=True,
-                   note="Phase16 census gap"),
-            Caller("__arm64_compat_sys_newstat", REQUIRED, 1, acknowledged=True,
-                   note="Phase16 census gap"),
-            Caller("__arm64_compat_sys_newlstat", REQUIRED, 1, acknowledged=True,
-                   note="Phase16 census gap"),
+            # Phase 18 ADOPTED: the Phase 17 census proved live vfs_statx
+            # sites in the old-stat/compat wrappers (the Phase 12-era comment
+            # claiming no such sites was wrong); the old symbol-scoped
+            # vfs_getattr_nosec kretprobe covered these callers.
+            Caller("__arm64_sys_stat64", REQUIRED, 1,
+                   note="ADOPTED Phase 18: live vfs_statx site at +0x54"),
+            Caller("__arm64_sys_lstat64", REQUIRED, 1,
+                   note="ADOPTED Phase 18: live vfs_statx site at +0x54"),
+            Caller("__arm64_compat_sys_newstat", REQUIRED, 1,
+                   note="ADOPTED Phase 18: live vfs_statx site"),
+            Caller("__arm64_compat_sys_newlstat", REQUIRED, 1,
+                   note="ADOPTED Phase 18: live vfs_statx site"),
         ),
     ),
     # -- stat-fd (all optional; dedicated fd slot) ------------------------------
@@ -391,15 +391,17 @@ ROUTES: List[Route] = [
     Route(
         id="susfs/do_filp_open", kind="manifest",
         cond="CONFIG_KSU_HOOKLESS_SUSFS", group="open-redirect",
-        acknowledge_unlisted=True,
-        note="Phase16 census: do_open_execat and file_open_name also BL directly "
-             "to do_filp_open on lisa-5.4 but are absent from the runtime "
-             "manifest; acknowledged coverage gap",
         targets=(Target("do_filp_open", "ksu_do_filp_open", "do_filp_open_fn",
                         binding="realbody"),),
         callers=(
             Caller("do_sys_openat2", REQUIRED, 1, cond="KSU_HAS_OPENAT2"),
             Caller("do_sys_open", OPTIONAL, 1, cond="KSU_HAS_OPENAT2"),
+            Caller("do_open_execat", REQUIRED, 1,
+                   note="ADOPTED Phase 18: execve(2)/execveat(2) pathname "
+                        "entry; live do_filp_open site (+0x7c)"),
+            Caller("file_open_name", REQUIRED, 1,
+                   note="ADOPTED Phase 18: kernel-internal named-open "
+                        "helper; live do_filp_open site (+0xf8)"),
             Caller("do_sys_open", REQUIRED, 1, cond="!KSU_HAS_OPENAT2"),
             Caller("do_sys_openat2", UNSUPPORTED, 0, cond="!KSU_HAS_OPENAT2"),
         ),
@@ -429,10 +431,14 @@ ROUTES: List[Route] = [
             Caller("__se_sys_fsmount", OPTIONAL, 1,
                    cond="kver >= KV(5, 0, 0)"),
             Caller("fuse_dentry_automount", OPTIONAL, 1),
-            Caller("vfs_kern_mount", REQUIRED, 1, acknowledged=True,
-                   note="Phase16 census: vfs_kern_mount BLs directly to "
-                        "vfs_create_mount on lisa-5.4 but is absent from the "
-                        "runtime manifest; acknowledged coverage gap"),
+            Caller("vfs_kern_mount", UNSUPPORTED, 0, explicitly_excluded=True,
+                   note="Phase 18 EXPLICITLY OUT OF PROFILE: live "
+                        "vfs_create_mount site, but internal multi-mount "
+                        "helper; readiness would gate the whole atomic mount "
+                        "trio on an LTO-fragile symbol, and fc_mount row "
+                        "already covers its fc_mount-like callers.  Known "
+                        "documented behavior change vs the pre-branch-link "
+                        "symbol-scoped probe."),
         ),
     ),
     Route(
@@ -539,8 +545,10 @@ GROUPS: Dict[str, Tuple[str, ...]] = {
     "exec": ("execve/do_execveat_common",),
 }
 
-# Runtime capacity: must match KSU_BL_MAX_RECORDS (branch_link_hook.c:55).
-MAX_RECORDS = 160
+# Runtime capacity: must match KSU_BL_MAX_RECORDS (branch_link_hook.c).
+# Phase 18: raised 160 -> 176 alongside the adopted census gaps
+# (reference census 162) plus ~9% headroom for multi-site row growth.
+MAX_RECORDS = 176
 # Runtime default scan width: KSU_BL_SCAN_WIDTH = 128 * sizeof(void *).
 SCAN_WIDTH = 0x400
 # Runtime width field is u16 (branch_link_hook.c:117).
