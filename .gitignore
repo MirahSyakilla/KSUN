@@ -38,3 +38,5 @@ validation/audit/phase18/boot_work/
 validation/audit/phase18/flash_boot.img
 validation/tests/nomount_bench
 validation/audit/phase19/boot_work/
+validation/audit/phase20/boot_work/
+validation/audit/phase20/device_suite_p20.log
