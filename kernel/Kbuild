@@ -77,7 +77,7 @@ ifeq ($(wildcard $(KSU_BL_GEN_DIR)/bl_manifest_gen.c),)
 $(KSU_BL_GEN_DIR)/bl_manifest_gen.c $(KSU_BL_GEN_DIR)/bl_manifest_ids.h:
 	$(Q)mkdir -p $(KSU_BL_GEN_DIR)
 	$(Q)$(PYTHON3) $(srctree)/drivers/kernelsu/../tools/bl-analyzer/bl_analyzer_v2.py \
-		--bootstrap --nonce $$(od -An -N4 -tx4 /dev/urandom | tr -d ' \n') \
+		--bootstrap --nonce 0x$$(od -An -N4 -tx4 /dev/urandom | tr -d ' \n') \
 		--output-ids $(KSU_BL_GEN_DIR)/bl_manifest_ids.h \
 		--output-object $(KSU_BL_GEN_DIR)/bl_manifest_gen.c
 endif

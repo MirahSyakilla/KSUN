@@ -52,11 +52,26 @@ fail() {
 }
 trap 'fail "interrupted (signal)"' INT TERM HUP
 
+payload_of() {
+	# strictly one well-formed 64-hex payload_sha256 or fail (Phase 20
+	# adversarial review: empty/multiple/short digests must fail closed)
+	_f="$1"
+	_v=$(grep -o '"payload_sha256": "[0-9a-f]\{64\}"' "$_f" | wc -l)
+	if [ "$_v" != "1" ]; then
+		fail "payload digest missing/ambiguous in $_f ($_v matches)"
+	fi
+	grep -o '"payload_sha256": "[0-9a-f]\{64\}"' "$_f" \
+		| sed 's/.*"\([0-9a-f]\{64\}\)".*/\1/'
+}
+
 # content-derived transaction dir: fresh per generation
 rm -rf "$TX"
 mkdir -p "$TX" || fail "cannot create $TX"
 
 # ---- stage 0 marker ----------------------------------------------------------
+# A stale stage-guard from a previous run would permanently no-op all
+# subsequent postlinks (Phase 20 adversarial review finding 9).  The guard
+# is set fresh here and cleared at READY/fail.
 echo "$NONCE" > "$TX/stage0"
 echo "final" > "$STAGE_DIR/stage-guard"
 
@@ -79,17 +94,6 @@ echo "$NONCE" > "$TX/stage1"
 mv "$TX/bl_manifest_ids.h" "$GEN_IDS"
 mv "$TX/bl_manifest_gen.c" "$GEN_SRC"
 
-payload_of() {
-	# strictly one well-formed 64-hex payload_sha256 or fail (Phase 20
-	# adversarial review: empty/multiple/short digests must fail closed)
-	_f="$1"
-	_v=$(grep -o '"payload_sha256": "[0-9a-f]\{64\}"' "$_f" | wc -l)
-	if [ "$_v" != "1" ]; then
-		fail "payload digest missing/ambiguous in $_f ($_v matches)"
-	fi
-	grep -o '"payload_sha256": "[0-9a-f]\{64\}"' "$_f" \
-		| sed 's/.*"\([0-9a-f]\{64\}\)".*/\1/'
-}
 
 # stage-1 payload digest (fixed-point reference)
 P1=""

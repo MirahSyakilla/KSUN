@@ -20,10 +20,14 @@
 
 ifeq ($(KSU_BL_GENERATED_HOOK),)
 
-.PHONY: FORCE
+.PHONY: FORCE clean
 FORCE:
 
-%.ko %.o clean: FORCE
+%.ko: FORCE
+	@true
+%.o: FORCE
+	@true
+clean: FORCE
 	@true
 
 vmlinux: FORCE

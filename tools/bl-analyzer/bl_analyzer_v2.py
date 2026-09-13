@@ -82,6 +82,11 @@ def run_tool(argv, what):
     return r.stdout
 
 
+def analyzer_digest() -> str:
+    with open(__file__, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
 def sha256_file(path):
     if not os.path.exists(path):
         raise Fail(EXIT_INPUT, "INPUT_MISSING", path)
