@@ -1,0 +1,204 @@
+=== KernelSU-Next branch-link validation suite ===
+Timestamp: 20260913-094822
+Kernel: 5.4.302-MeowKernel-v2.03-e380c91
+
+
+====== test_branch_link_inventory.sh ======
+=== branch-link inventory ===
+--- KSU wrapper symbols ---
+  kallsyms: ksu_do_faccessat = PRESENT
+  kallsyms: ksu_do_readlinkat = PRESENT
+  kallsyms: ksu_vfs_statx = PRESENT
+  kallsyms: ksu_do_sys_open = PRESENT
+  kallsyms: ksu_do_filp_open = PRESENT
+  kallsyms: ksu_do_execve_file = PRESENT
+  kallsyms: ksu_vfs_create_mount = PRESENT
+  kallsyms: ksu_clone_mnt = PRESENT
+  kallsyms: ksu_cleanup_mnt = PRESENT
+  kallsyms: ksu_user_statfs = PRESENT
+  kallsyms: ksu_fd_statfs = PRESENT
+--- Required kernel helpers ---
+  kallsyms: do_faccessat = PRESENT
+  kallsyms: do_readlinkat = PRESENT
+  kallsyms: vfs_statx = PRESENT
+  kallsyms: user_statfs = PRESENT
+  kallsyms: fd_statfs = PRESENT
+  kallsyms: do_filp_open = PRESENT
+  kallsyms: do_sys_open = PRESENT
+  kallsyms: vfs_getattr_nosec = PRESENT
+  kallsyms: vfs_create_mount = PRESENT
+  kallsyms: clone_mnt = PRESENT
+  kallsyms: cleanup_mnt = PRESENT
+  kallsyms: __do_execve_file = PRESENT
+--- Branch-link readiness (dmesg) ---
+[    6.624649] KernelSU: branch_link: readiness faccess=1 readlink=1 permission=1 dpath=1 avc=1 gname-flags=1 gname-kernel=1 iterate=1 stat-path=1 stat-fd=0 statfs=1 exec=1 mount=1 records=162
+  READY: faccess
+  READY: readlink
+  READY: stat-path
+  NOT-READY (fallback active): stat-fd
+  READY: statfs
+  READY: exec
+  READY: mount
+--- Rollback / conflict state ---
+  conflicts: 0
+  restores/rollbacks: 0
+--- Branch-link global state ---
+  families READY: 13 / 7
+  patch records: 162
+--- Summary ---
+PASS=6 FAIL=0 UNKNOWN=1
+
+====== test_avc_spoof.sh ======
+=== avc_spoof (hookless BL) ===
+PASS: avc branch-link family installed
+PASS: avc family 7/7 sites committed
+PASS: audit records present (CONFIG_AUDIT=y path live)
+PASS: avc_spoof enabled by default
+PASS: avc_spoof disable accepted
+PASS: avc_spoof re-enable accepted
+PASS: hookless arming message present
+PASS: no kprobe registration for AVC
+PASS: concurrent AVC-generating syscalls completed
+PASS: no kernel BUG/OOPS
+PASS: SELinux enforcing preserved
+PASS: avc family fail-closed log absent (committed cleanly)
+---
+avc_spoof: PASS=12 FAIL=0 SKIP=0
+
+====== test_compat_table_invariant.sh ======
+=== compat syscall-table invariant ===
+PASS: tamper dispatcher enabled
+  registered nrs: 48 79 142 147 160 221 
+PASS: no duplicate syscall-hook registrations
+PASS: syscall hooks registered
+PASS: compat reboot slot 88 mirrors native 142
+PASS: compat syscall 88 dispatcher installed
+PASS: no compat hook failures
+PASS: compat task syscalls functional (32-bit tester)
+PASS: native syscall routing functional
+---
+compat-table: PASS=8 FAIL=0 SKIP=0
+
+====== test_permission_lifetime.sh ======
+=== permission one-shot lifetime ===
+PASS: round 1: first redirected open (scope 1, consumed)
+PASS: round 1: second open (fresh scope)
+PASS: round 1: repeated open
+PASS: round 1: visible identity stable
+PASS: round 1: cleanup restored stock
+PASS: round 2: first redirected open (scope 1, consumed)
+PASS: round 2: second open (fresh scope)
+PASS: round 2: repeated open
+PASS: round 2: visible identity stable
+PASS: round 2: cleanup restored stock
+PASS: round 3: first redirected open (scope 1, consumed)
+PASS: round 3: second open (fresh scope)
+PASS: round 3: repeated open
+PASS: round 3: visible identity stable
+PASS: round 3: cleanup restored stock
+PASS: concurrent scope isolation (4x30 opens, no cross-talk)
+PASS: no kernel BUG/OOPS during lifetime test
+---
+lifetime: PASS=17 FAIL=0 SKIP=0
+
+====== test_signal_namespace_race.sh ======
+=== signal/namespace race ===
+PASS: S1: fork/exec storm + concurrent lookups (60 rounds)
+PASS: S2: SIGKILL storm during redirected lookups (40 rounds)
+PASS: S3: mount churn + concurrent redirects (40 mnt ops / 120 lookups)
+S4 ok=1
+PASS: S4: add/del racing lookups (25 cycles) redirect intact
+PASS: no new kernel BUG/OOPS (delta 0)
+---
+race: PASS=5 FAIL=0 SKIP=0
+
+====== test_faccessat.sh ======
+PASS: native faccessat absolute readable
+PASS: native faccessat relative AT_FDCWD
+PASS: faccessat dirfd traversal
+PASS: faccessat nonexistent -> ENOENT
+SKIP: faccessat2 not in kernel (5.4 stock)
+PASS: compat faccessat
+  note: running as uid=0, EACCES tests are advisory only
+---
+faccessat: PASS=5 FAIL=0 SKIP=1
+
+====== test_readlink.sh ======
+PASS: native readlink absolute symlink
+PASS: readlink /proc/self/exe
+/data/local/tmp/bl-tests/test_readlink.sh[37]: 99: inaccessible or not found
+
+====== test_stat_statfs.sh ======
+PASS: stat absolute
+PASS: stat relative AT_FDCWD
+PASS: stat .. traversal
+PASS: stat nonexistent -> ENOENT
+PASS: stat size correct
+PASS: statfs via df
+/data/local/tmp/bl-tests/test_stat_statfs.sh[54]: 98: inaccessible or not found
+
+====== test_open.sh ======
+PASS: openat absolute path
+PASS: openat relative AT_FDCWD
+PASS: openat O_CREAT new file
+PASS: creat/touch new file
+PASS: openat symlink follows
+SKIP: O_NOFOLLOW (needs C harness)
+SKIP: O_PATH (needs C harness)
+SKIP: O_TMPFILE (needs fs support + C harness)
+PASS: openat .. traversal
+PASS: openat nonexistent -> ENOENT
+SKIP: open_redirect (no susfs CLI)
+PASS: compat creat/open/stat/readlink/faccessat
+---
+open: PASS=8 FAIL=0 SKIP=4
+
+====== test_exec.sh ======
+PASS: execve absolute ELF
+PASS: execve shebang script
+PASS: exec toybox binary
+PASS: exec nonexistent -> ENOENT/127
+PASS: exec directory -> error
+PASS: sucompat /system/bin/su -> uid=0
+PASS: ksud binary present
+  root context: context=u:r:ksu:s0
+PASS: KernelSU root with SELinux context
+SKIP: execveat AT_EMPTY_PATH (needs C harness)
+PASS: compat execve
+---
+exec: PASS=9 FAIL=0 SKIP=1
+
+====== test_mount.sh ======
+PASS: proc/mounts populated (141 entries)
+PASS: mountinfo root entry
+SKIP: SUSFS mount rules (no CLI)
+PASS: namespace entries (4)
+PASS: NoMount nl tool
+---
+mount: PASS=4 FAIL=0 SKIP=1
+
+====== test_lifecycle.sh ======
+PASS: syscall path functional (provider active)
+PASS: no branch-link restore conflicts
+=== concurrency stress (4 workers x 200 iterations) ===
+PASS: concurrency stress completed
+PASS: no kernel BUG/OOPS after stress
+PASS: syscalls functional post-stress
+PASS: dispatcher hook in kallsyms (fallback available)
+SKIP: repeated init/exit (needs module unload, deferred)
+---
+lifecycle: PASS=6 FAIL=0 SKIP=1
+
+====== t02_sucompat.sh ======
+uid=0
+PASS: ksud binary present
+PASS: sucompat /system/bin/su -> uid=0 (context=u:r:ksu:s0)
+current context: context=u:r:ksu:s0
+PASS: KSU SELinux domain
+SKIP: SUSFS CLI
+---
+sucompat: PASS=3 FAIL=0 SKIP=1
+
+========================================
+TOTAL: PASS=0 FAIL=0 SKIP=0
+RESULT: ALL PASS

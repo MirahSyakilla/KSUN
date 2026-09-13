@@ -34,3 +34,5 @@ validation/audit/phase17/t.err
 validation/audit/phase17/t.out
 validation/audit/phase17/trunc.map
 validation/audit/phase17/fixtures/
+validation/audit/phase18/boot_work/
+validation/audit/phase18/flash_boot.img
