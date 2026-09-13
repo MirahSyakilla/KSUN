@@ -1166,7 +1166,7 @@ static bool ksu_susfs_is_module_source(struct mount *mnt)
 		struct dentry *d = root;
 		int depth;
 
-		for (depth = 0; depth < 16 && !d_unhashed(d); depth++) {
+		for (depth = 0; depth < 16; depth++) {
 			if (d->d_name.name && d->d_name.len >= 3 &&
 			    !strncmp(d->d_name.name, "adb", 3))
 				return true;
