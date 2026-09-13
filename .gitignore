@@ -36,3 +36,4 @@ validation/audit/phase17/trunc.map
 validation/audit/phase17/fixtures/
 validation/audit/phase18/boot_work/
 validation/audit/phase18/flash_boot.img
+validation/tests/nomount_bench
