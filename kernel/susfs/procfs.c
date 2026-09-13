@@ -1441,11 +1441,21 @@ static int ksu_susfs_fdinfo_open(struct inode *inode, struct file *file)
 		return -ENOSYS;
 	}
 
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
+	/* NoMount-redirected fds need the identity rewrite too, and that layer
+	 * is independent of the SUSFS mount-hide view gate: an app with no
+	 * umount-list entry still sees a redirected fd's backend ino through
+	 * fdinfo while stat() reports the visible identity.  Take over the
+	 * show callback whenever NoMount is compiled in; the callback itself
+	 * still returns the original output when neither layer rewrites. */
+	return single_open(file, ksu_susfs_fdinfo_show, inode);
+#else
 	if (!ksu_susfs_mount_hide_view_enabled()) {
 		return ksu_susfs_orig_fdinfo_open(inode, file);
 	}
 
 	return single_open(file, ksu_susfs_fdinfo_show, inode);
+#endif
 }
 
 #ifdef CONFIG_KSU_HACK_ARM64_BRANCH_LINK
