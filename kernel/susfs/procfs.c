@@ -1153,18 +1153,29 @@ static int ksu_susfs_mntns_get_handler(struct kretprobe_instance *ri,
  * regardless of when the mounts were created. */
 static bool ksu_susfs_is_module_source(struct mount *mnt)
 {
-	char buf[256];
-	char *path;
-	struct vfsmount *vmnt = &mnt->mnt;
+	struct dentry *root = mnt->mnt.mnt_root;
 
-	if (!vmnt || !vmnt->mnt_root)
+	if (!root || IS_ERR_OR_NULL(root) || !root->d_name.name)
 		return false;
-	path = dentry_path_raw(vmnt->mnt_root, buf, sizeof(buf));
-	if (IS_ERR_OR_NULL(path))
-		return false;
-	/* Check for /adb/ or /modules/ in the source root path */
-	return strstr(path, "/adb/") != NULL ||
-	       strstr(path, "/modules/") != NULL;
+	/* Check the mount's root dentry name and its parent chain for
+	 * the /adb/ path component.  For a bind mount from
+	 * /adb/modules/..., the root dentry is "dex2oat64" or "dex2oat32";
+	 * its parent dentry chain within the source filesystem should
+	 * eventually reach a dentry named "adb". */
+	{
+		struct dentry *d = root;
+		int depth;
+
+		for (depth = 0; depth < 16 && !d_unhashed(d); depth++) {
+			if (d->d_name.name && d->d_name.len >= 3 &&
+			    !strncmp(d->d_name.name, "adb", 3))
+				return true;
+			if (IS_ROOT(d))
+				break;
+			d = d->d_parent;
+		}
+	}
+	return false;
 }
 
 
