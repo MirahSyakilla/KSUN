@@ -23,7 +23,7 @@
 #include <linux/string.h>
 
 #include "bl_manifest_schema.h"
-#include "bl_manifest_ids.h"
+#include <bl_manifest_ids.h>
 #include "branch_link_hook.h"
 
 extern const struct ksu_bl_gen_header ksu_bl_manifest_header;

@@ -58,6 +58,16 @@ ifeq ($(CONFIG_KSU_HACK_ARM64_BRANCH_LINK),y)
 kernelsu-objs += hook/arm64/branch_link_hook.o
 ifeq ($(CONFIG_KSU_BL_GENERATED),y)
 kernelsu-objs += hook/arm64/bl_manifest.o
+# generated manifest artifacts live in the object tree (coordinator-owned);
+# the data object is compiled from the object-tree source into the KSU archive
+KSU_BL_GEN_DIR := $(objtree)/drivers/kernelsu/hook/arm64
+ccflags-y += -I$(KSU_BL_GEN_DIR) -I$(srctree)/drivers/kernelsu/hook/arm64
+$(obj)/hook/arm64/bl_manifest.o: $(KSU_BL_GEN_DIR)/bl_manifest_ids.h
+
+targets += hook/arm64/bl_manifest_gen.o
+$(obj)/hook/arm64/bl_manifest_gen.o: $(KSU_BL_GEN_DIR)/bl_manifest_gen.c $(KSU_BL_GEN_DIR)/bl_manifest_ids.h FORCE
+	$(call if_changed_dep,cc_o_c)
+kernelsu-objs += hook/arm64/bl_manifest_gen.o
 endif
 endif
 else ifeq ($(CONFIG_X86_64),y)

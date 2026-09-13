@@ -31,6 +31,20 @@
 /* width field is u16; runtime KSU_BL_SCAN_WIDTH is the 0-alias default */
 #define KSU_BL_SCAN_WIDTH_MAX	0xFFFFU
 
+/* Classification vocabulary (shared with the runtime engines). */
+enum ksu_bl_manifest_class {
+	KSU_BL_SITE_OPTIONAL,
+	KSU_BL_SITE_REQUIRED,
+	KSU_BL_SITE_UNSUPPORTED,
+};
+
+/* Runtime capacity and scan constants (must match branch_link_hook.c). */
+#ifndef KSU_BL_MAX_RECORDS
+#define KSU_BL_MAX_RECORDS	176
+#endif
+#define KSU_BL_MAX_ROUTE_TARGETS	4
+#define KSU_BL_SCAN_WIDTH_DEFAULT	1024
+
 /* The generated data object is flagged bootstrap until the two-stage
  * coordinator's final pass replaces it with census-derived content. */
 #define KSU_BL_MANIFEST_F_BOOTSTRAP	0x0001U

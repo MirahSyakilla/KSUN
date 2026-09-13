@@ -1,6 +1,7 @@
 #ifdef __aarch64__
 
 #include "branch_link_hook.h"
+#include "bl_manifest_schema.h"
 
 #include <linux/compat.h>
 #include <linux/build_bug.h>
@@ -58,11 +59,13 @@ bool ksu_avc_spoof_active(void);
  * compiler shapes.  bl_policy.py:MAX_RECORDS must be kept in lockstep --
  * the offline analyzer hard-fails on divergence.
  */
+#ifndef KSU_BL_MAX_RECORDS
 #define KSU_BL_MAX_RECORDS 176
+#endif
 /* Max distinct targets a single routes/exec transaction can bind fn_slots
  * for (stat-path 2, stat-fd 2, open-scope 1, legacy exec 2).  The slot
  * rollback stack in ksu_bl_record_patch_routes() is sized from this. */
-#define KSU_BL_MAX_ROUTE_TARGETS 4
+
 #define KSU_AARCH64_BL_OPCODE 0x94000000U
 #define KSU_AARCH64_BL_MASK 0xfc000000U
 #define KSU_AARCH64_BRANCH_IMM_MASK 0x03ffffffU
@@ -108,12 +111,6 @@ struct ksu_bl_record {
 	u32 original_word;
 	u32 replacement_word;
 	u8 state;
-};
-
-enum ksu_bl_manifest_class {
-	KSU_BL_SITE_OPTIONAL,
-	KSU_BL_SITE_REQUIRED,
-	KSU_BL_SITE_UNSUPPORTED,
 };
 
 struct ksu_bl_manifest_caller {
