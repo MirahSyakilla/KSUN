@@ -37,3 +37,4 @@ validation/audit/phase17/fixtures/
 validation/audit/phase18/boot_work/
 validation/audit/phase18/flash_boot.img
 validation/tests/nomount_bench
+validation/audit/phase19/boot_work/
