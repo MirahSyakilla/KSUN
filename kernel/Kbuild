@@ -56,6 +56,9 @@ ifeq ($(CONFIG_ARM64),y)
 kernelsu-objs += hook/arm64/syscall_hook.o
 ifeq ($(CONFIG_KSU_HACK_ARM64_BRANCH_LINK),y)
 kernelsu-objs += hook/arm64/branch_link_hook.o
+ifeq ($(CONFIG_KSU_BL_GENERATED),y)
+kernelsu-objs += hook/arm64/bl_manifest.o
+endif
 endif
 else ifeq ($(CONFIG_X86_64),y)
 kernelsu-objs += hook/x86_64/syscall_hook.o

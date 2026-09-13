@@ -2919,6 +2919,17 @@ int ksu_branch_link_patch_init(void)
 		mutex_unlock(&ksu_bl_lock);
 		return -EBUSY;
 	}
+#ifdef CONFIG_KSU_BL_GENERATED
+	/* Generated-manifest profile: the BL subsystem only runs when the
+	 * coordinator-produced data object validated at boot.  Missing,
+	 * stale, or malformed data disables the whole subsystem here --
+	 * fail closed, no fallback to the bootstrap arrays. */
+	ksu_bl_manifest_init();
+	if (!ksu_bl_generated_manifest_ready()) {
+		mutex_unlock(&ksu_bl_lock);
+		return -ENODATA;
+	}
+#endif
 	ksu_bl_state = KSU_BL_INSTALLING;
 	ksu_bl_faccessat_ready = false;
 	ksu_bl_readlink_ready = false;

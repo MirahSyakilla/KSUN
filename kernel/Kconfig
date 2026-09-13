@@ -92,6 +92,20 @@ config KSU_HACK_ARM64_BRANCH_LINK
 	  builds still require the hook text to land within the ARM64 BL
 	  +/-128 MiB range, otherwise patching will be refused at runtime.
 
+config KSU_BL_GENERATED
+	bool "KernelSU branch-link generated manifest data object"
+	depends on KSU_HACK_ARM64_BRANCH_LINK
+	default n
+	help
+	  Compile the branch-link runtime against a generated manifest data
+	  object (produced by the guarded two-stage build coordinator from
+	  the exact linked kernel image) instead of the source-owned
+	  bootstrap arrays.  When enabled, a missing, stale, or malformed
+	  generated object FAILS CLOSED: the whole branch-link subsystem
+	  stays disabled and any probe-based fallbacks remain authoritative.
+	  The generated object stores symbol names and enum IDs only; the
+	  runtime continues to resolve and verify every target at boot.
+
 config KSU_HOOKLESS_SUSFS
 	bool "KernelSU hookless SUSFS"
 	depends on KSU && KSU != m && KSU_HOOK_CORE

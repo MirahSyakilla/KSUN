@@ -1,0 +1,28 @@
+# KernelSU-Next branch-link two-stage coordinator postlink hook.
+# Installed as arch/arm64/Makefile.postlink by kernel/setup.sh ONLY when
+# CONFIG_KSU_BL_GENERATED=y (the ARCH_POSTLINK wildcard at the top-level
+# Makefile picks this file up automatically when present).
+#
+# Guard contract:
+#  - only the vmlinux postlink invocation runs the coordinator;
+#  - module postlink calls ($@ = *.ko) are a no-op;
+#  - the stage-2 relink re-entry (KSU_BL_STAGE=final) verifies state and
+#    returns without launching another coordinator.
+
+ifeq ($(KSU_BL_GENERATED_HOOK),)
+
+# module / non-vmlinux invocations: no-op
+%.ko %.o:
+	@true
+
+vmlinux:
+	@if [ "$(notdir $@)" != "vmlinux" ]; then exit 0; fi
+	@if [ "$$(cat $(objtree)/.ksu-bl/stage-guard 2>/dev/null)" = "final" ]; then \
+		exit 0; \
+	fi
+	@if [ -n "$$KSU_BL_STAGE" ] && [ "$$KSU_BL_STAGE" = "final" ]; then \
+		exit 0; \
+	fi
+	@$(Q)$(CONFIG_SHELL) $(srctree)/KernelSU-Next/kernel/build/bl-coordinator.sh
+
+endif
