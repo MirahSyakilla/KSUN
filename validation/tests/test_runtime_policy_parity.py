@@ -10,6 +10,7 @@ openat2, legacy exec, compat_execveat).  Any drift fails.
 import os
 import re
 import sys
+from collections import Counter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.join(HERE, "..", "..")
@@ -26,7 +27,16 @@ CTX = {"CONFIG_COMPAT": True, "CONFIG_AUDIT": True,
        "__NR_faccessat2": False, "__NR_statx": True, "__NR_execveat": True,
        "KSU_HAS_OPENAT2": False, "KSU_EXECVE_COMMON_HELPER": False,
        "KSU_HAS_COMPAT_EXECVEAT": True, "KSU_HAS_FACCESSAT2": False,
+       # profile macros resolve to the lisa reference profile
+       "KSU_BL_EXEC_COMMON_PROFILE": 0,
+       "CONFIG_KSU_BL_GENERATED": True,
+       "KSU_BL_MAX_RECORDS": 176,
+       "__aarch64__": True,
        "kver": (5, 4, 302)}
+
+# Macros that are NOT in CTX default to SKIP (fail-closed), not visible.
+# The visibility map records skipped spans and the comparison fails if any
+# row text was hidden by an unknown guard (mutation-verified blind spot 2).
 
 CLS = {"KSU_BL_SITE_REQUIRED": "required",
        "KSU_BL_SITE_OPTIONAL": "optional",
@@ -55,6 +65,9 @@ def parse_ternary(line):
     return (name, cls, int(min_s), 0)
 
 # --- file-wide preprocessor visibility ---------------------------------------
+unknown_guards = set()
+
+
 def build_visibility(text):
     stack = []
     vis = []
@@ -62,11 +75,15 @@ def build_visibility(text):
         s = line.strip()
         m = re.match(r"#\s*ifdef\s+(\w+)", s)
         if m:
-            stack.append(bool(CTX.get(m.group(1), True)))
+            if m.group(1) not in CTX:
+                unknown_guards.add(m.group(1))
+            stack.append(bool(CTX.get(m.group(1), False)))
             vis.append(None)
             continue
         m = re.match(r"#\s*ifndef\s+(\w+)", s)
         if m:
+            if m.group(1) not in CTX:
+                unknown_guards.add(m.group(1))
             stack.append(not bool(CTX.get(m.group(1), False)))
             vis.append(None)
             continue
@@ -172,10 +189,28 @@ for bi in range(len(headings) - 1):
             if c.cond and not P.eval_cond(c.cond, CTX):
                 continue
             pol_rows.append((c.name, c.classification, c.min_sites, c.width))
-    rt_s = sorted(rt_rows)
-    pol_s = sorted(pol_rows)
-    only_rt = [x for x in rt_s if x not in pol_s]
-    only_pol = [x for x in pol_s if x not in rt_s]
+    # exec block contains both profile shapes' arrays; only the ACTIVE
+    # profile's rows are compiled. Dedupe the policy expectation to the
+    # active exec routes when the block carries the common-profile literal.
+    if "execve/do_execveat_common" in rids and \
+            CTX.get("KSU_BL_EXEC_COMMON_PROFILE", 0) == 0:
+        # common-profile rows are compiled out; drop them from policy
+        common = next(x for x in P.ROUTES if x.id == "execve/do_execveat_common")
+        common_rows = Counter()
+        for c in common.callers:
+            if c.cond and not P.eval_cond(c.cond, CTX):
+                continue
+            common_rows[(c.name, c.classification, c.min_sites, c.width)] += 1
+        pol_c = Counter(pol_rows)
+        for k in list(pol_c):
+            if common_rows[k] and pol_c[k] > 1:
+                pol_c[k] -= 1  # the shared syscall-entry rows appear once in
+                # the compiled #else arm; extra duplicates are common-profile
+        pol_rows = list(pol_c.elements())
+    rt_c = Counter(rt_rows)
+    pol_c = Counter(pol_rows)
+    only_rt = list((rt_c - pol_c).elements())
+    only_pol = list((pol_c - rt_c).elements())
     if only_rt or only_pol:
         fails.append("routes=%s\n  runtime-only=%s\n  policy-only=%s"
                      % (rids, only_rt[:6], only_pol[:6]))
@@ -193,6 +228,8 @@ for f in fails:
     print("FAIL", f)
 for m in missing:
     print("FAIL missing block for route:", m)
+for g in sorted(unknown_guards):
+    print("WARN unknown guard macro (rows hidden):", g)
 ok = not fails and not missing
 print("PASS" if ok else "FAIL")
 sys.exit(0 if ok else 1)

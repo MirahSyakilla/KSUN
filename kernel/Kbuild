@@ -68,6 +68,19 @@ targets += hook/arm64/bl_manifest_gen.o
 $(obj)/hook/arm64/bl_manifest_gen.o: $(KSU_BL_GEN_DIR)/bl_manifest_gen.c $(KSU_BL_GEN_DIR)/bl_manifest_ids.h FORCE
 	$(call if_changed_dep,cc_o_c)
 kernelsu-objs += hook/arm64/bl_manifest_gen.o
+
+# Clean-build bootstrap pre-seed (Phase 20: the chicken-and-egg fix — the
+# coordinator runs only after a link exists, so the FIRST link compiles a
+# manifest-independent bootstrap object pre-seeded here when artifacts are
+# absent).  The seed uses policy-derived enums only; no census is required.
+ifeq ($(wildcard $(KSU_BL_GEN_DIR)/bl_manifest_gen.c),)
+$(KSU_BL_GEN_DIR)/bl_manifest_gen.c $(KSU_BL_GEN_DIR)/bl_manifest_ids.h:
+	$(Q)mkdir -p $(KSU_BL_GEN_DIR)
+	$(Q)$(PYTHON3) $(srctree)/drivers/kernelsu/../tools/bl-analyzer/bl_analyzer_v2.py \
+		--bootstrap --nonce $$(od -An -N4 -tx4 /dev/urandom | tr -d ' \n') \
+		--output-ids $(KSU_BL_GEN_DIR)/bl_manifest_ids.h \
+		--output-object $(KSU_BL_GEN_DIR)/bl_manifest_gen.c
+endif
 endif
 endif
 else ifeq ($(CONFIG_X86_64),y)

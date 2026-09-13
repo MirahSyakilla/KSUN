@@ -60,6 +60,9 @@
 #include "susfs/compat.h"
 #include "susfs/procfs.h"
 #include "susfs/susfs.h"
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
+#include "nomount/nomount.h"
+#endif
 
 #define KSU_SUSFS_MOUNT_HASH_BITS 8
 #define KSU_SUSFS_CMDLINE_RETRY_DELAY_MS 1000
@@ -1387,8 +1390,18 @@ static int ksu_susfs_fdinfo_show(struct seq_file *m, void *v)
 	if (ksu_susfs_mount_hide_view_enabled()) {
 		int mnt_id = 0;
 		unsigned long ino = 0;
-
-		if (ksu_susfs_fdinfo_rewrite(file, &mnt_id, &ino)) {
+		bool rewritten = ksu_susfs_fdinfo_rewrite(file, &mnt_id, &ino);
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
+		/* Phase 20: NoMount-redirected fds must report the same
+		 * visible identity as stat() on the virtual path -- the
+		 * same-fd cross-check (fdinfo vs fstat) must agree, exactly
+		 * as in native state.  Only the ino is rewritten here; the
+		 * backend mount is on a visible mount (redirected /data
+		 * path), so its mnt_id legitimately appears in mountinfo. */
+		if (!rewritten && ksu_nomount_fdinfo_identity(file, &ino))
+			rewritten = true;
+#endif
+		if (rewritten) {
 			seq_printf(m,
 				   "pos:\t%lli\nflags:\t0%o\nmnt_id:\t%i\nino:\t%lu\n",
 				   (long long)file->f_pos, f_flags, mnt_id,

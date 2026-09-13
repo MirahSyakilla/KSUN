@@ -3530,6 +3530,37 @@ void ksu_nomount_handle_statfs_path(long ret, const struct path *path,
 	__putname(page);
 }
 
+/*
+ * Phase 20 (red-team finding H): fdinfo ino/mnt_id consistency for
+ * NoMount-redirected fds.  A redirected fd's /proc/<pid>/fdinfo previously
+ * reported the backend inode number while stat() on the virtual path
+ * reported the visible identity -- a same-fd divergence no native state
+ * can produce.  This helper resolves the file's identity through the same
+ * rule tables the getattr layer uses, so fdinfo agrees with stat.
+ * Returns true when the identity was rewritten.
+ */
+bool ksu_nomount_fdinfo_identity(struct file *file, unsigned long *ino)
+{
+	struct ksu_nomount_rule *rule;
+	struct inode *inode;
+
+	if (!file || !file->f_path.dentry)
+		return false;
+	inode = file_inode(file);
+	if (!inode)
+		return false;
+
+	rcu_read_lock();
+	rule = ksu_nomount_find_real_rule_rcu(inode);
+	if (rule) {
+		*ino = rule->visible_ino;
+		rcu_read_unlock();
+		return true;
+	}
+	rcu_read_unlock();
+	return false;
+}
+
 bool ksu_nomount_spoof_mmap_metadata(struct inode *inode, dev_t *dev,
 				     unsigned long *ino)
 {

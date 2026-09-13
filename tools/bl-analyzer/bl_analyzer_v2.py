@@ -856,6 +856,9 @@ def analyze(args):
         image_sha = sha256_file(args.image)
     elif args.image:
         raise Fail(EXIT_INPUT, "IMAGE_MISSING", args.image)
+    elif getattr(args, "stage2", False):
+        raise Fail(EXIT_IDENTITY, "IMAGE_MISSING_STAGE2",
+                   "--stage2 requires --image for final-image identity")
 
     routes_result = []
     any_drift = False
@@ -1041,6 +1044,7 @@ def analyze(args):
         "policy_revision": P.POLICY_REVISION,
         "policy_id": P.POLICY_ID,
         "policy_sha256": P.policy_digest(),
+        "analyzer_sha256": analyzer_digest(),
         "analyzer_version": "2",
         # no wall-clock timestamp: outputs must be byte-deterministic
         "inputs": {
@@ -1073,9 +1077,15 @@ def main():
                          "object (route/hook/slot ids, schema consts)")
     ap.add_argument("--output-object",
                     help="emit the generated manifest data object C source")
+    ap.add_argument("--stage2", action="store_true",
+                    help="final-image verification mode: --image is "
+                         "mandatory; identity mismatches exit 16")
     ap.add_argument("--bootstrap", action="store_true",
                     help="emit a manifest-independent bootstrap object "
                          "(zero rows, BOOTSTRAP flag); no vmlinux needed")
+    ap.add_argument("--expect-payload",
+                    help="stage2: require the final payload digest to "
+                         "equal this stage-1 value (fixed-point gate)")
     ap.add_argument("--nonce",
                     help="per-generation nonce binding the ids header to the "
                          "data object (required with --output-ids/--output-object)")
@@ -1130,6 +1140,14 @@ def main():
     except Exception as e:                       # noqa: BLE001
         log("%d/INTERNAL: unhandled: %r" % (EX_INTERNAL, e))
         sys.exit(EX_INTERNAL)
+
+    if getattr(args, "stage2", False) and args.expect_payload:
+        if stamp["payload_sha256"] != args.expect_payload:
+            log("%d/IDENTITY: fixed-point failure: stage1=%s final=%s"
+                % (EXIT_IDENTITY, args.expect_payload,
+                   stamp["payload_sha256"]))
+            sys.exit(EXIT_IDENTITY)
+        log("fixed point verified: %s" % stamp["payload_sha256"])
 
     if args.output_json:
         atomic_write_json(args.output_json, {

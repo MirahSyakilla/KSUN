@@ -110,6 +110,7 @@ void ksu_nomount_handle_statfs(long ret, const struct path *path,
 			       struct kstatfs *statfs);
 void ksu_nomount_handle_statfs_path(long ret, const struct path *path,
 				    struct kstatfs *statfs);
+bool ksu_nomount_fdinfo_identity(struct file *file, unsigned long *ino);
 bool ksu_nomount_spoof_mmap_metadata(struct inode *inode, dev_t *dev,
 				     unsigned long *ino);
 bool ksu_nomount_active_for_current(void);
