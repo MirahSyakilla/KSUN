@@ -89,12 +89,16 @@ The source/evidence copy is:
 validation/audit/phase22/adb-local-port-guard.sh
 ```
 
-The guard is root-owned, mode `0755`, and idempotently reconciles IPv4 and IPv6
-`OUTPUT` rules every 15 seconds. It matches:
+The currently installed guard is root-owned, mode `0755`, and reconciles IPv4
+and IPv6 `OUTPUT` rules every 15 seconds. The repository copy is an audit
+source artifact; deployment ownership remains `/data/adb/service.d` and must be
+bound to the device's service owner before release. The tightened source uses a
+dedicated chain and derives per-user app/isolated UID ranges instead of one
+global high-UID range. It matches:
 
 - local delivery through `lo`;
 - TCP ports `5555` and `7777`;
-- Android app/isolated UID range `10000-99999999`;
+- per-user Android app and isolated UID ranges;
 - `REJECT --reject-with tcp-reset`.
 
 It intentionally does not match:
@@ -141,11 +145,31 @@ Neutral app UID `10310` was rejected on:
 The TCP ADB transport remained reachable. The rules were present in both
 `iptables-save` and `ip6tables-save` for ports `5555` and `7777`.
 
-The source script installed on the device has SHA-256:
+The source script installed on the tested device had SHA-256:
 
 ```text
 0840e88cda67d7c951449d6f98e5f31304886fd0c318c68b50e870247d4dad54
 ```
+
+The tested device-side pathname hide was also enabled with:
+
+```text
+susfs add_sus_path_loop /dev/socket/adbd
+```
+
+Root continued to see `/dev/socket/adbd`. The genuine neutral
+`u:r:untrusted_app` harness observed:
+
+```text
+PATH_STAT=STAT_FAIL errno=2(No such file or directory)
+OPEN_path=FAIL errno=2(No such file or directory)
+```
+
+This is the required `ENOENT` result. The socket's DAC mode, owner, and
+`adbd_socket` SELinux label were not changed. The persistent configuration
+owner is BRENE's `custom_sus_path_loop.txt`, which is consumed by its existing
+boot-completed SUSFS path loader; the corresponding source entry must be
+carried by the deployed BRENE module before a fresh reboot claim is made.
 
 ## Limitations
 
@@ -157,9 +181,12 @@ The source script installed on the device has SHA-256:
    be extended with explicit current local-address rules.
 3. `netd` may restore or replace firewall state. The reconciliation loop handles
    ordinary removal but is not a formal netd policy owner.
-4. Manual validation of the pre-existing detector applications remains required
+4. The guard source requires same-boot validation of the dedicated chain,
+   per-user ranges, command compatibility, and rule presence after netd
+   replacement before it is treated as a release artifact.
+5. Manual validation of the pre-existing detector applications remains required
    and was deliberately not automated.
-5. Existing Phase 22 NoMount/VFS/procfs/manifest blockers remain open; this
+6. Existing Phase 22 NoMount/VFS/procfs/manifest blockers remain open; this
    addendum does not claim full security closure.
 
 ## Final Status
