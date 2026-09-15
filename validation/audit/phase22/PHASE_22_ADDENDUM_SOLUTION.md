@@ -128,13 +128,13 @@ also remained successful.
 After reboot:
 
 ```text
-kernel: 5.4.302-g94039356
+kernel: 5.4.302-g98391209
 boot_completed: 1
 SELinux: Enforcing
 guard process: /data/adb/service.d/ksu-app-port-guard.sh
 ```
 
-Neutral app UID `10310` was rejected on:
+Neutral app UID `10302` was rejected on:
 
 ```text
 127.0.0.1:7777
@@ -145,10 +145,13 @@ Neutral app UID `10310` was rejected on:
 The TCP ADB transport remained reachable. The rules were present in both
 `iptables-save` and `ip6tables-save` for ports `5555` and `7777`.
 
+The deployed `KSU_ADB_LOCAL` chain contained the per-user app and isolated
+ranges `10000-19999` and `99000-99999` in both address families.
+
 The source script installed on the tested device had SHA-256:
 
 ```text
-0840e88cda67d7c951449d6f98e5f31304886fd0c318c68b50e870247d4dad54
+be5bcc72cbe1d73ba4dec1c5147244c8fb4e3e7914a41a183793e629b0d63129
 ```
 
 The tested device-side pathname hide was also enabled with:
@@ -168,8 +171,8 @@ OPEN_path=FAIL errno=2(No such file or directory)
 This is the required `ENOENT` result. The socket's DAC mode, owner, and
 `adbd_socket` SELinux label were not changed. The persistent configuration
 owner is BRENE's `custom_sus_path_loop.txt`, which is consumed by its existing
-boot-completed SUSFS path loader; the corresponding source entry must be
-carried by the deployed BRENE module before a fresh reboot claim is made.
+boot-completed SUSFS path loader. The corresponding source entry is committed
+in the BRENE repository.
 
 ## Limitations
 
