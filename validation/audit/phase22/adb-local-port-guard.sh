@@ -36,7 +36,13 @@ ensure_rule() {
 	port="$2"
 	uid_range="$3"
 
-	"$table_cmd" -C "$CHAIN" -o lo -p tcp -m tcp --dport "$port" \
+	if "$table_cmd" -C "$CHAIN" -o lo -p tcp -m tcp --dport "$port" \
+		-m owner --uid-owner "$uid_range" \
+		-j REJECT --reject-with tcp-reset 2>/dev/null; then
+		return 0
+	fi
+
+	"$table_cmd" -A "$CHAIN" -o lo -p tcp -m tcp --dport "$port" \
 		-m owner --uid-owner "$uid_range" \
 		-j REJECT --reject-with tcp-reset 2>/dev/null
 }
