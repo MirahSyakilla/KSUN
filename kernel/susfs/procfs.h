@@ -10,6 +10,7 @@ struct vfsmount;
 
 int ksu_susfs_procfs_init(void);
 void ksu_susfs_procfs_exit(void);
+bool ksu_susfs_unix_should_hide_abstract(const char *sun_path, int path_len);
 
 bool ksu_susfs_handle_mount_compat(void __user *arg);
 bool ksu_susfs_handle_cmdline_compat(void __user *arg);

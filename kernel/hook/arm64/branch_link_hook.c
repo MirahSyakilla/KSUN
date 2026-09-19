@@ -17,8 +17,10 @@
 #include <linux/stat.h>
 #include <linux/statfs.h>
 #include <linux/uaccess.h>
+#include <linux/un.h>
 #include <linux/version.h>
 #include <asm/unistd.h>
+#include <net/sock.h>
 
 #include "internal.h"
 #include "pnode.h"
@@ -2573,6 +2575,67 @@ static void __nocfi ksu_cleanup_mnt(struct mount *mnt)
 	cleanup_mnt_fn(mnt);
 }
 
+static struct sock *(*unix_find_other_fn)(struct net *net,
+					  struct sockaddr_un *sunname, int len,
+					  int type, unsigned int hash,
+					  int *error);
+
+static struct sock *__nocfi ksu_unix_find_other(struct net *net,
+						struct sockaddr_un *sunname,
+						int len, int type,
+						unsigned int hash, int *error)
+{
+	struct sock *(*orig)(struct net *, struct sockaddr_un *, int, int,
+			     unsigned int, int *);
+	int path_len;
+
+	if (sunname && len > (int)offsetof(struct sockaddr_un, sun_path)) {
+		path_len = len - offsetof(struct sockaddr_un, sun_path);
+		if (ksu_susfs_unix_should_hide_abstract(sunname->sun_path,
+							path_len)) {
+			if (error)
+				*error = -ECONNREFUSED;
+			return NULL;
+		}
+	}
+
+	orig = READ_ONCE(unix_find_other_fn);
+	if (unlikely(!orig)) {
+		if (error)
+			*error = -EOPNOTSUPP;
+		return NULL;
+	}
+	return orig(net, sunname, len, type, hash, error);
+}
+
+static void ksu_branch_link_patch_unix_find_other(void)
+{
+	static const struct ksu_bl_manifest_caller callers[] = {
+		{ "unix_stream_connect", KSU_BL_SITE_OPTIONAL, 1 },
+		{ "unix_dgram_connect", KSU_BL_SITE_OPTIONAL, 1 },
+		{ "unix_dgram_sendmsg", KSU_BL_SITE_OPTIONAL, 1 },
+	};
+	struct ksu_bl_manifest_target targets[] = {
+		{ "unix_find_other", (unsigned long)ksu_unix_find_other,
+		  (unsigned long *)&unix_find_other_fn },
+	};
+	unsigned int found = 0;
+	unsigned int patched = 0;
+	int count;
+
+	count = ksu_bl_record_patch_routes(
+		"susfs/unix_find_other", callers, ARRAY_SIZE(callers),
+		targets, ARRAY_SIZE(targets), &found, &patched);
+	if (count <= 0) {
+		if (ksu_bl_records_all_restored())
+			WRITE_ONCE(unix_find_other_fn, NULL);
+		pr_info("branch_link: susfs/unix_find_other optional=%d\n",
+			count);
+		return;
+	}
+	pr_info("branch_link: susfs/unix_find_other sites=%d\n", count);
+}
+
 static bool ksu_branch_link_patch_susfs(void)
 {
 #if defined(KSU_HAS_OPENAT2)
@@ -2857,6 +2920,8 @@ static bool ksu_branch_link_patch_susfs(void)
 		ksu_bl_restore_records_from(mount_first_record);
 	ksu_susfs_set_mount_runtime_ready(ksu_bl_mount_ready);
 	}
+
+	ksu_branch_link_patch_unix_find_other();
 	return direct_getattr_ready;
 }
 #endif

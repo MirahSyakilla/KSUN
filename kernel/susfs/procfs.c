@@ -36,8 +36,12 @@
 #include <linux/string.h>
 #include <linux/task_work.h>
 #include <linux/uaccess.h>
+#include <linux/un.h>
 #include <linux/utsname.h>
 #include <linux/workqueue.h>
+#include <linux/netdevice.h>
+#include <net/af_unix.h>
+#include <net/sock.h>
 
 #include <asm/unistd.h>
 
@@ -157,6 +161,15 @@ static int (*ksu_susfs_orig_cmdline_show)(struct seq_file *m, void *v);
 static bool ksu_susfs_mount_runtime_ready;
 static bool ksu_susfs_uname_hook_ready;
 static bool ksu_susfs_mount_window_open;
+static bool ksu_susfs_unix_seq_ready;
+static const struct seq_operations *ksu_susfs_unix_seqops;
+static int (*ksu_susfs_orig_unix_seq_show)(struct seq_file *m, void *v);
+static bool ksu_susfs_comm_ready;
+static const struct file_operations *ksu_susfs_comm_fops;
+static int (*ksu_susfs_orig_comm_open)(struct inode *inode, struct file *file);
+static bool ksu_susfs_dev_seq_ready;
+static const struct seq_operations *ksu_susfs_dev_seqops;
+static int (*ksu_susfs_orig_dev_seq_show)(struct seq_file *m, void *v);
 static int ksu_susfs_cmdline_last_err;
 static unsigned int ksu_susfs_prop_hygiene_attempts;
 
@@ -991,6 +1004,290 @@ static void ksu_susfs_restore_fop_open(const struct file_operations *fops,
 	}
 
 	*old_open = NULL;
+}
+
+static int ksu_susfs_patch_seqop_show(
+	const struct seq_operations *seqops,
+	int (*new_show)(struct seq_file *, void *),
+	int (**old_show)(struct seq_file *, void *))
+{
+	int (*orig_show)(struct seq_file *m, void *v);
+	void *dst;
+
+	if (!seqops || !new_show) {
+		return -EINVAL;
+	}
+
+	orig_show = READ_ONCE(seqops->show);
+	if (!orig_show) {
+		return -EINVAL;
+	}
+
+	if (old_show) {
+		*old_show = orig_show;
+	}
+
+	dst = (void *)&((struct seq_operations *)seqops)->show;
+	return ksu_patch_text(dst, &new_show, sizeof(new_show),
+			      KSU_PATCH_TEXT_FLUSH_DCACHE);
+}
+
+static void ksu_susfs_restore_seqop_show(
+	const struct seq_operations *seqops,
+	int (**old_show)(struct seq_file *, void *))
+{
+	int (*orig_show)(struct seq_file *m, void *v);
+	void *dst;
+
+	if (!seqops || !old_show || !*old_show) {
+		return;
+	}
+
+	orig_show = *old_show;
+	dst = (void *)&((struct seq_operations *)seqops)->show;
+	if (ksu_patch_text(dst, &orig_show, sizeof(orig_show),
+			   KSU_PATCH_TEXT_FLUSH_DCACHE)) {
+		pr_err("susfs: failed to restore unix seq show\n");
+	}
+
+	*old_show = NULL;
+}
+
+bool ksu_susfs_unix_should_hide_abstract(const char *sun_path, int path_len)
+{
+	const char *name;
+	int nlen;
+
+	if (!sun_path || path_len < 2 || sun_path[0] != '\0') {
+		return false;
+	}
+	if (!ksu_susfs_path_filter_active()) {
+		return false;
+	}
+
+	name = sun_path + 1;
+	nlen = path_len - 1;
+	if (nlen >= 5 && !memcmp(name, "jdwp-", 5)) {
+		return true;
+	}
+	return false;
+}
+
+static int ksu_susfs_unix_seq_show(struct seq_file *m, void *v)
+{
+	if (v && v != SEQ_START_TOKEN) {
+		struct sock *s = v;
+		struct unix_sock *u = unix_sk(s);
+
+		if (u->addr) {
+			int path_len = u->addr->len -
+				offsetof(struct sockaddr_un, sun_path);
+
+			if (ksu_susfs_unix_should_hide_abstract(
+				    u->addr->name->sun_path, path_len)) {
+				return 0;
+			}
+		}
+	}
+
+	if (!ksu_susfs_orig_unix_seq_show) {
+		return 0;
+	}
+	return ksu_susfs_orig_unix_seq_show(m, v);
+}
+
+static int ksu_susfs_unix_seq_enable(void)
+{
+	unsigned long addr;
+	int err;
+
+	addr = find_kernel_symbol_exact("unix_seq_ops");
+	if (!addr) {
+		pr_warn("susfs: unix_seq_ops unavailable\n");
+		return -ENOENT;
+	}
+
+	ksu_susfs_unix_seqops = (const struct seq_operations *)addr;
+	err = ksu_susfs_patch_seqop_show(ksu_susfs_unix_seqops,
+					 ksu_susfs_unix_seq_show,
+					 &ksu_susfs_orig_unix_seq_show);
+	if (err) {
+		pr_warn("susfs: unix seq wrapper unavailable: %d\n", err);
+		ksu_susfs_unix_seqops = NULL;
+		return err;
+	}
+
+	ksu_susfs_unix_seq_ready = true;
+	pr_info("susfs: unix seq hide ready\n");
+	return 0;
+}
+
+static void ksu_susfs_unix_seq_disable(void)
+{
+	if (!ksu_susfs_unix_seq_ready) {
+		return;
+	}
+
+	ksu_susfs_restore_seqop_show(ksu_susfs_unix_seqops,
+				     &ksu_susfs_orig_unix_seq_show);
+	ksu_susfs_unix_seqops = NULL;
+	ksu_susfs_unix_seq_ready = false;
+}
+
+static bool ksu_susfs_comm_should_hide(const char *comm)
+{
+	if (!comm || comm[0] == '\0') {
+		return false;
+	}
+	if (!strncmp(comm, "ADB-JDWP", 8)) {
+		return true;
+	}
+	if (strstr(comm, "AdbConnection")) {
+		return true;
+	}
+	return false;
+}
+
+static int ksu_susfs_comm_show(struct seq_file *m, void *v)
+{
+	struct inode *inode = m->private;
+	struct task_struct *p;
+	char comm[TASK_COMM_LEN];
+
+	p = get_proc_task(inode);
+	if (!p) {
+		return -ESRCH;
+	}
+
+	if (ksu_susfs_path_filter_active()) {
+		get_task_comm(comm, p);
+		if (ksu_susfs_comm_should_hide(comm)) {
+			seq_printf(m, "Thread-%d\n", task_pid_vnr(p));
+			put_task_struct(p);
+			return 0;
+		}
+	}
+
+	proc_task_name(m, p, false);
+	seq_putc(m, '\n');
+	put_task_struct(p);
+	return 0;
+}
+
+static int ksu_susfs_comm_open(struct inode *inode, struct file *filp)
+{
+	return single_open(filp, ksu_susfs_comm_show, inode);
+}
+
+static int ksu_susfs_comm_enable(void)
+{
+	unsigned long addr;
+	int err;
+
+	addr = find_kernel_symbol_exact("proc_pid_set_comm_operations");
+	if (!addr) {
+		pr_warn("susfs: proc_pid_set_comm_operations unavailable\n");
+		return -ENOENT;
+	}
+
+	ksu_susfs_comm_fops = (const struct file_operations *)addr;
+	err = ksu_susfs_patch_fop_open(ksu_susfs_comm_fops,
+				       ksu_susfs_comm_open,
+				       &ksu_susfs_orig_comm_open);
+	if (err) {
+		pr_warn("susfs: comm wrapper unavailable: %d\n", err);
+		ksu_susfs_comm_fops = NULL;
+		return err;
+	}
+
+	ksu_susfs_comm_ready = true;
+	pr_info("susfs: comm hide ready\n");
+	return 0;
+}
+
+static void ksu_susfs_comm_disable(void)
+{
+	if (!ksu_susfs_comm_ready) {
+		return;
+	}
+
+	ksu_susfs_restore_fop_open(ksu_susfs_comm_fops,
+				   &ksu_susfs_orig_comm_open);
+	ksu_susfs_comm_fops = NULL;
+	ksu_susfs_comm_ready = false;
+}
+
+static bool ksu_susfs_netdev_should_hide(const char *name)
+{
+	if (!name || name[0] == '\0') {
+		return false;
+	}
+	if (!strncmp(name, "tun", 3) || !strncmp(name, "tap", 3) ||
+	    !strncmp(name, "ppp", 3) || !strncmp(name, "ipsec", 5)) {
+		return true;
+	}
+	if (name[0] == 'w' && name[1] == 'g' &&
+	    (name[2] == '\0' || (name[2] >= '0' && name[2] <= '9'))) {
+		return true;
+	}
+	if (strstr(name, "vpn")) {
+		return true;
+	}
+	return false;
+}
+
+static int ksu_susfs_dev_seq_show(struct seq_file *m, void *v)
+{
+	if (v && v != SEQ_START_TOKEN && ksu_susfs_path_filter_active()) {
+		struct net_device *dev = v;
+
+		if (ksu_susfs_netdev_should_hide(dev->name)) {
+			return 0;
+		}
+	}
+
+	if (!ksu_susfs_orig_dev_seq_show) {
+		return 0;
+	}
+	return ksu_susfs_orig_dev_seq_show(m, v);
+}
+
+static int ksu_susfs_dev_seq_enable(void)
+{
+	unsigned long addr;
+	int err;
+
+	addr = find_kernel_symbol_exact("dev_seq_ops");
+	if (!addr) {
+		pr_warn("susfs: dev_seq_ops unavailable\n");
+		return -ENOENT;
+	}
+
+	ksu_susfs_dev_seqops = (const struct seq_operations *)addr;
+	err = ksu_susfs_patch_seqop_show(ksu_susfs_dev_seqops,
+					 ksu_susfs_dev_seq_show,
+					 &ksu_susfs_orig_dev_seq_show);
+	if (err) {
+		pr_warn("susfs: netdev seq wrapper unavailable: %d\n", err);
+		ksu_susfs_dev_seqops = NULL;
+		return err;
+	}
+
+	ksu_susfs_dev_seq_ready = true;
+	pr_info("susfs: netdev seq hide ready\n");
+	return 0;
+}
+
+static void ksu_susfs_dev_seq_disable(void)
+{
+	if (!ksu_susfs_dev_seq_ready) {
+		return;
+	}
+
+	ksu_susfs_restore_seqop_show(ksu_susfs_dev_seqops,
+				     &ksu_susfs_orig_dev_seq_show);
+	ksu_susfs_dev_seqops = NULL;
+	ksu_susfs_dev_seq_ready = false;
 }
 
 static struct mnt_namespace *ksu_susfs_to_mnt_ns(struct ns_common *ns)
@@ -2357,6 +2654,21 @@ int ksu_susfs_procfs_init(void)
 		pr_warn("susfs: mount runtime unavailable: %d\n", ret);
 	}
 
+	ret = ksu_susfs_unix_seq_enable();
+	if (ret) {
+		pr_warn("susfs: unix seq hide unavailable: %d\n", ret);
+	}
+
+	ret = ksu_susfs_comm_enable();
+	if (ret) {
+		pr_warn("susfs: comm hide unavailable: %d\n", ret);
+	}
+
+	ret = ksu_susfs_dev_seq_enable();
+	if (ret) {
+		pr_warn("susfs: netdev seq hide unavailable: %d\n", ret);
+	}
+
 #ifdef __NR_uname
 	ret = ksu_register_syscall_hook(__NR_uname, ksu_susfs_hook_uname);
 	if (ret && ret != -EEXIST) {
@@ -2382,6 +2694,9 @@ void ksu_susfs_procfs_exit(void)
 		static_branch_disable(&ksu_susfs_uname_spoof_enabled);
 	}
 
+	ksu_susfs_unix_seq_disable();
+	ksu_susfs_comm_disable();
+	ksu_susfs_dev_seq_disable();
 	ksu_susfs_cmdline_runtime_disable();
 	ksu_susfs_cmdline_ready = false;
 	cancel_delayed_work_sync(&ksu_susfs_prop_hygiene_restore_work);

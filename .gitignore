@@ -40,3 +40,9 @@ validation/tests/nomount_bench
 validation/audit/phase19/boot_work/
 validation/audit/phase20/boot_work/
 validation/audit/phase20/device_suite_p20.log
+validation/audit/phase22/boot_work/
+validation/audit/phase22/launch-base.apk
+validation/audit/phase22/vdinfos-*.json
+validation/audit/phase22/hma-config*.json
+validation/audit/phase22/agent-*/
+validation/audit/phase22/build-identity.sh
