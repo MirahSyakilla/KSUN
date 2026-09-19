@@ -9,6 +9,8 @@
 #define WEBVIEW_ZYGOTE_UID 1053
 #define FIRST_APPLICATION_UID 10000
 #define LAST_APPLICATION_UID 19999
+#define FIRST_APP_ZYGOTE_ISOLATED_UID 90000
+#define LAST_APP_ZYGOTE_ISOLATED_UID 98999
 #define FIRST_ISOLATED_UID 99000
 #define LAST_ISOLATED_UID 99999
 
@@ -55,8 +57,11 @@ static inline bool is_appuid(uid_t uid)
 
 static inline bool is_isolated_process(uid_t uid)
 {
-    uid_t appid = uid % PER_USER_RANGE;
-    return appid >= FIRST_ISOLATED_UID && appid <= LAST_ISOLATED_UID;
+	uid_t appid = uid % PER_USER_RANGE;
+
+	return (appid >= FIRST_APP_ZYGOTE_ISOLATED_UID &&
+		appid <= LAST_APP_ZYGOTE_ISOLATED_UID) ||
+	       (appid >= FIRST_ISOLATED_UID && appid <= LAST_ISOLATED_UID);
 }
 extern bool allow_shell;
 
