@@ -936,6 +936,10 @@ static int __nocfi ksu_do_inode_permission(struct inode *inode, int mask)
 	ret = orig_inode_permission(inode, mask);
 	if (ret && ksu_nomount_handle_permission(inode, mask))
 		ret = 0;
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
+	if (ret && ksu_susfs_inode_is_hidden(inode))
+		ret = -ENOENT;
+#endif
 	return ret;
 }
 

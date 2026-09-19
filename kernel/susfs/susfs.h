@@ -63,6 +63,7 @@ void ksu_susfs_apply_default_rules(void);
 void ksu_susfs_handle_boot_completed(void);
 bool ksu_susfs_path_filter_active(void);
 bool ksu_susfs_should_hide_path(const char *path, size_t len);
+bool ksu_susfs_inode_is_hidden(const struct inode *inode);
 bool ksu_susfs_relative_hide_rule_may_match(const char *path, size_t len);
 bool ksu_susfs_open_redirect_active(void);
 bool ksu_susfs_open_redirect_runtime_ready(void);

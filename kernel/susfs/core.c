@@ -46,6 +46,7 @@
 
 static const char *const ksu_susfs_default_hide_paths[] = {
 	"/product/overlay/LineageSDKOverlaySM8350.apk",
+	"/data/adb",
 };
 
 enum ksu_susfs_rule_type {
@@ -220,6 +221,30 @@ static bool ksu_susfs_should_hide_current(void)
 bool ksu_susfs_path_filter_active(void)
 {
 	return ksu_susfs_should_hide_current();
+}
+
+bool ksu_susfs_inode_is_hidden(const struct inode *inode)
+{
+	struct ksu_susfs_rule *rule;
+	int bkt;
+	bool hidden = false;
+
+	if (!inode || !inode->i_sb || !ksu_susfs_path_filter_active()) {
+		return false;
+	}
+
+	rcu_read_lock();
+	hash_for_each_rcu(ksu_susfs_rules_ht, bkt, rule, path_node) {
+		if (rule->type == KSU_SUSFS_RULE_HIDE &&
+		    rule->target_ino &&
+		    rule->target_ino == inode->i_ino &&
+		    rule->target_dev == inode->i_sb->s_dev) {
+			hidden = true;
+			break;
+		}
+	}
+	rcu_read_unlock();
+	return hidden;
 }
 
 bool ksu_susfs_should_hide_path(const char *path, size_t len)
@@ -1172,6 +1197,8 @@ static int ksu_susfs_add_rule(const char *visible_path, const char *backend_path
 	struct kstatfs visible_statfs = { };
 	struct inode *target_inode = NULL;
 	struct inode *redirected_inode = NULL;
+	unsigned long hide_ino = 0;
+	dev_t hide_dev = 0;
 	int err;
 	bool has_visible_stat = false;
 	bool new_parent = false;
@@ -1194,6 +1221,12 @@ static int ksu_susfs_add_rule(const char *visible_path, const char *backend_path
 		err = ksu_susfs_resolve_path(normalized_visible, &resolved);
 		if (err) {
 			return err;
+		}
+		if (!backend_path && resolved.dentry &&
+		    resolved.dentry->d_inode &&
+		    resolved.dentry->d_inode->i_sb) {
+			hide_ino = resolved.dentry->d_inode->i_ino;
+			hide_dev = resolved.dentry->d_inode->i_sb->s_dev;
 		}
 		path_put(&resolved);
 	}
@@ -1224,9 +1257,21 @@ static int ksu_susfs_add_rule(const char *visible_path, const char *backend_path
 
 	mutex_lock(&ksu_susfs_lock);
 
-	if (ksu_susfs_find_rule_locked(normalized_visible)) {
-		err = -EEXIST;
-		goto out_unlock;
+	{
+		struct ksu_susfs_rule *existing =
+			ksu_susfs_find_rule_locked(normalized_visible);
+
+		if (existing) {
+			if (existing->type == KSU_SUSFS_RULE_HIDE &&
+			    !existing->target_ino && hide_ino) {
+				existing->target_ino = hide_ino;
+				existing->target_dev = hide_dev;
+				err = 0;
+				goto out_unlock;
+			}
+			err = -EEXIST;
+			goto out_unlock;
+		}
 	}
 
 	parent = ksu_susfs_find_parent_locked(parent_path);
@@ -1300,6 +1345,9 @@ static int ksu_susfs_add_rule(const char *visible_path, const char *backend_path
 		rule->target_dev = rule->target_inode->i_sb->s_dev;
 		rule->backend_ino = rule->backend_inode->i_ino;
 		rule->backend_dev = rule->backend_inode->i_sb->s_dev;
+	} else {
+		rule->target_ino = hide_ino;
+		rule->target_dev = hide_dev;
 	}
 
 	hash_add_rcu(ksu_susfs_rules_ht, &rule->path_node, rule->path_hash);
