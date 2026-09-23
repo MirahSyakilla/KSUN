@@ -62,7 +62,7 @@ bool ksu_avc_spoof_active(void);
  * the offline analyzer hard-fails on divergence.
  */
 #ifndef KSU_BL_MAX_RECORDS
-#define KSU_BL_MAX_RECORDS 176
+#define KSU_BL_MAX_RECORDS 192
 #endif
 /* Max distinct targets a single routes/exec transaction can bind fn_slots
  * for (stat-path 2, stat-fd 2, open-scope 1, legacy exec 2).  The slot
@@ -2656,6 +2656,7 @@ static bool ksu_branch_link_patch_susfs(void)
 		 * profile below; the old symbol-scoped probe covered them. */
 		{ "do_open_execat", KSU_BL_SITE_REQUIRED, 1 },
 		{ "file_open_name", KSU_BL_SITE_REQUIRED, 1 },
+		{ "open_exec", KSU_BL_SITE_REQUIRED, 1 },
 	};
 #else
 	static const struct ksu_bl_manifest_caller do_filp_open_callers[] = {
@@ -2674,6 +2675,7 @@ static bool ksu_branch_link_patch_susfs(void)
 		 * helper; both flow through the same redirect wrapper. */
 		{ "do_open_execat", KSU_BL_SITE_REQUIRED, 1 },
 		{ "file_open_name", KSU_BL_SITE_REQUIRED, 1 },
+		{ "open_exec", KSU_BL_SITE_REQUIRED, 1 },
 	};
 #endif
 	static const struct ksu_bl_manifest_caller vfs_create_mount_callers[] = {

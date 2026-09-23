@@ -108,6 +108,21 @@ KSU_BL_STAGE=final \
 [ -f "$SYSMAP" ] || fail "stage-2 produced no System.map"
 echo "$NONCE" > "$TX/stage2"
 
+# Image is produced by the Image target AFTER vmlinux postlink. Stage 3
+# identity needs it now; synthesize the same way arch/arm64/boot/Makefile
+# does so a clean tree (no leftover Image) can still finish.
+if [ ! -f "$IMAGE" ]; then
+	mkdir -p "$(dirname "$IMAGE")"
+	if command -v llvm-objcopy >/dev/null 2>&1; then
+		OBJCOPY_BIN=llvm-objcopy
+	else
+		OBJCOPY_BIN=aarch64-linux-gnu-objcopy
+	fi
+	log "producing Image for stage-3 identity via $OBJCOPY_BIN"
+	"$OBJCOPY_BIN" -O binary -R .note -R .note.gnu.build-id -R .comment -S \
+		"$VMLINUX" "$IMAGE" || fail "cannot produce Image for stage-3"
+fi
+
 # ---- stage 3: independent final-image analysis, bounded fixed point -----------
 # The analyzer's --stage2 --expect-payload gate returns EXIT_IDENTITY (16)
 # on payload drift.  One bounded regeneration iteration is allowed: rebuild

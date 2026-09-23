@@ -40,7 +40,7 @@ enum ksu_bl_manifest_class {
 
 /* Runtime capacity and scan constants (must match branch_link_hook.c). */
 #ifndef KSU_BL_MAX_RECORDS
-#define KSU_BL_MAX_RECORDS	176
+#define KSU_BL_MAX_RECORDS	192
 #endif
 #define KSU_BL_MAX_ROUTE_TARGETS	4
 #define KSU_BL_SCAN_WIDTH_DEFAULT	1024

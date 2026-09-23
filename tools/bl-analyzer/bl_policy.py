@@ -171,7 +171,7 @@ ROUTES: List[Route] = [
         id="dpath/d_path", kind="manifest",
         cond="CONFIG_KSU_HOOKLESS_NOMOUNT", group="dpath",
         profile="lisa-5.4",
-        census_expected_sites=21,  # 20 original + audit_log_d_path
+        census_expected_sites=21,
         ksu_internal="explicit",
         targets=(Target("d_path", "ksu_do_dpath", "d_path_fn"),),
         callers=(
@@ -402,6 +402,8 @@ ROUTES: List[Route] = [
             Caller("file_open_name", REQUIRED, 1,
                    note="ADOPTED Phase 18: kernel-internal named-open "
                         "helper; live do_filp_open site (+0xf8)"),
+            Caller("open_exec", OPTIONAL, 1,
+                   note="no direct do_filp_open; calls do_open_execat"),
             Caller("do_sys_open", REQUIRED, 1, cond="!KSU_HAS_OPENAT2"),
             Caller("do_sys_openat2", UNSUPPORTED, 0, cond="!KSU_HAS_OPENAT2"),
         ),
@@ -546,9 +548,9 @@ GROUPS: Dict[str, Tuple[str, ...]] = {
 }
 
 # Runtime capacity: must match KSU_BL_MAX_RECORDS (branch_link_hook.c).
-# Phase 18: raised 160 -> 176 alongside the adopted census gaps
-# (reference census 162) plus ~9% headroom for multi-site row growth.
-MAX_RECORDS = 176
+# Phase 18: 160 -> 176. Phase 23: 176 -> 192 after census 181
+# exceeded capacity (headroom for multi-site row growth).
+MAX_RECORDS = 192
 # Runtime default scan width: KSU_BL_SCAN_WIDTH = 128 * sizeof(void *).
 SCAN_WIDTH = 0x400
 # Runtime width field is u16 (branch_link_hook.c:117).

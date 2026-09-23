@@ -30,7 +30,7 @@ CTX = {"CONFIG_COMPAT": True, "CONFIG_AUDIT": True,
        # profile macros resolve to the lisa reference profile
        "KSU_BL_EXEC_COMMON_PROFILE": 0,
        "CONFIG_KSU_BL_GENERATED": True,
-       "KSU_BL_MAX_RECORDS": 176,
+       "KSU_BL_MAX_RECORDS": 192,
        "__aarch64__": True,
        "kver": (5, 4, 302)}
 
