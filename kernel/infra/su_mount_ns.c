@@ -34,6 +34,7 @@ extern int path_mount(const char *dev_name, struct path *path,
                       const char *type_page, unsigned long flags,
                       void *data_page);
 
+#ifndef ksu_sys_setns
 #if defined(__aarch64__) && defined(KSU_ARM64_HAS_PTREGS_SYSCALL)
 extern long __arm64_sys_setns(const struct pt_regs *regs);
 #elif defined(__x86_64__)
@@ -62,6 +63,7 @@ static long ksu_sys_setns(int fd, int flags)
 #error "Unsupported arch"
 #endif
 }
+#endif
 
 static long ksu_mnt_ns_setns_task(struct task_struct *task)
 {

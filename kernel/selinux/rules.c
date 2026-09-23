@@ -98,6 +98,16 @@ static void ksu_apply_policy_guardrails(struct policydb *db)
     }
 
     ksu_guardrail_deny_execmem(db);
+
+    if (ksu_exists(db, "app_zygote") && ksu_exists(db, "tmpfs")) {
+        ksu_allow(db, "app_zygote", "tmpfs", "dir", "read");
+        ksu_allow(db, "app_zygote", "tmpfs", "dir", "open");
+        ksu_allow(db, "app_zygote", "tmpfs", "dir", "search");
+        ksu_allow(db, "app_zygote", "tmpfs", "dir", "getattr");
+    }
+    if (ksu_exists(db, "app_zygote") && ksu_exists(db, "fuse")) {
+        ksu_deny_effective(db, "app_zygote", "fuse", "lnk_file", "create");
+    }
 }
 
 #if ((!defined(KSU_COMPAT_USE_SELINUX_STATE)) || LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0))
@@ -222,10 +232,15 @@ void apply_kernelsu_rules()
     }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) || defined(KSU_COMPAT_HAS_POLICY_MUTEX)
-    struct selinux_policy *pol, *old_pol = selinux_state.policy;
+    struct selinux_policy *pol, *old_pol;
     mutex_lock(&selinux_state.policy_mutex);
-    backup_sepolicy =
-        ksu_dup_sepolicy(rcu_dereference_protected(old_pol, lockdep_is_held(&selinux_state.policy_mutex)));
+    old_pol = rcu_dereference_protected(selinux_state.policy, lockdep_is_held(&selinux_state.policy_mutex));
+    if (!old_pol) {
+        pr_warn("SELinux policy is NULL. Skipping SELinux rules application.\n");
+        mutex_unlock(&selinux_state.policy_mutex);
+        return;
+    }
+    backup_sepolicy = ksu_dup_sepolicy(old_pol);
     if (IS_ERR(backup_sepolicy)) {
         pr_err("failed to create backup sepolicy: %ld\n", PTR_ERR(backup_sepolicy));
         backup_sepolicy = NULL;
@@ -247,8 +262,7 @@ void apply_kernelsu_rules()
             }
         }
     }
-    pol = ksu_dup_sepolicy(rcu_dereference_protected(
-        old_pol, lockdep_is_held(&selinux_state.policy_mutex)));
+    pol = ksu_dup_sepolicy(old_pol);
     if (IS_ERR(pol)) {
         pr_err("failed to dup selinux_policy: %ld\n", PTR_ERR(pol));
         goto out_unlock;
@@ -720,8 +734,13 @@ int handle_sepolicy(void __user *user_data, u64 data_len)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) || defined(KSU_COMPAT_HAS_POLICY_MUTEX)
     struct selinux_policy *pol, *old_pol;
     mutex_lock(&selinux_state.policy_mutex);
-    old_pol = selinux_state.policy;
-    pol = ksu_dup_sepolicy(rcu_dereference_protected(old_pol, lockdep_is_held(&selinux_state.policy_mutex)));
+    old_pol = rcu_dereference_protected(selinux_state.policy, lockdep_is_held(&selinux_state.policy_mutex));
+    if (!old_pol) {
+        pr_warn("SELinux policy is NULL. Skipping ksu_handle_sepolicy.\n");
+        ret = -EINVAL;
+        goto out_unlock;
+    }
+    pol = ksu_dup_sepolicy(old_pol);
     if (IS_ERR(pol)) {
         ret = PTR_ERR(pol);
         pr_err("ksu_dup_sepolicy err: %d\n", ret);

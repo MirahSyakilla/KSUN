@@ -21,6 +21,7 @@
 #include "uapi/app_profile.h"
 #include "klog.h" // IWYU pragma: keep
 #include "compat/kernel_compat.h"
+#include "util.h"
 
 struct sdesc {
 	struct shash_desc shash;
@@ -191,18 +192,13 @@ static __always_inline bool check_v2_signature(char *path,
 
 	bool v2_signing_valid = false;
 	int v2_signing_blocks = 0;
-	bool v3_signing_exist = false;
-	bool v3_1_signing_exist = false;
 
 	int i;
-	struct file *fp = filp_open(path, O_RDONLY, 0);
+	struct file *fp = ksu_filp_open_nonotify(path, O_RDONLY | O_NOATIME);
 	if (IS_ERR(fp)) {
 		pr_err("open %s error.\n", path);
 		return false;
 	}
-
-	// disable inotify for this file
-	fp->f_mode |= FMODE_NONOTIFY;
 
 	// https://en.wikipedia.org/wiki/Zip_(file_format)#End_of_central_directory_record_(EOCD)
 	for (i = 0;; ++i) {
@@ -267,16 +263,12 @@ static __always_inline bool check_v2_signature(char *path,
             v2_signing_blocks++;
             v2_signing_valid = check_block(fp, &size4, &pos, &offset,
                                            expected_size, expected_sha256);
-        } else if (id == 0xf05368c0u) {
-            // http://aospxref.com/android-14.0.0_r2/xref/frameworks/base/core/java/android/util/apk/ApkSignatureSchemeV3Verifier.java#73
-            v3_signing_exist = true;
-        } else if (id == 0x1b93ad61u) {
-            // http://aospxref.com/android-14.0.0_r2/xref/frameworks/base/core/java/android/util/apk/ApkSignatureSchemeV3Verifier.java#74
-            v3_1_signing_exist = true;
-        } else {
+        } else if (id != 0x42726577u) {
 #ifdef CONFIG_KSU_DEBUG
-			pr_info("Unknown id: 0x%08x\n", id);
+			pr_info("Unexpected signature block id: 0x%08x\n", id);
 #endif
+			v2_signing_valid = false;
+			goto clean;
 		}
 		pos += (size8 - offset);
 	}
@@ -298,13 +290,6 @@ static __always_inline bool check_v2_signature(char *path,
 	}
 clean:
 	filp_close(fp, 0);
-
-	if (v3_signing_exist || v3_1_signing_exist) {
-#ifdef CONFIG_KSU_DEBUG
-		pr_err("Unexpected v3 signature scheme found!\n");
-#endif
-		return false;
-	}
 
 	return v2_signing_valid;
 }
