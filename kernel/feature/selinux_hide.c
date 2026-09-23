@@ -475,13 +475,8 @@ static void ksu_hide_sanitize_status(struct selinux_kernel_status *status)
 {
     if (!status) return;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0)
-    status->policyload = KSU_SELINUX_POLICYLOAD_SEQNO;
-    status->sequence = 4;
-#else
     status->policyload = 0;
     status->sequence = 0;
-#endif
 
     if (ksu_late_loaded && !status->enforcing) {
         status->enforcing = 1;
