@@ -161,6 +161,7 @@ static int (*ksu_susfs_orig_cmdline_show)(struct seq_file *m, void *v);
 #endif
 static bool ksu_susfs_mount_runtime_ready;
 static bool ksu_susfs_uname_hook_ready;
+static bool ksu_susfs_gethostname_hook_ready;
 static bool ksu_susfs_mount_window_open;
 static bool ksu_susfs_unix_seq_ready;
 static const struct seq_operations *ksu_susfs_unix_seqops;
@@ -2583,20 +2584,23 @@ static long __nocfi ksu_susfs_hook_uname(int orig_nr, const struct pt_regs *regs
 {
 	struct new_utsname __user *name =
 		(struct new_utsname __user *)PT_REGS_PARM1(regs);
+	struct new_utsname tmp;
+	bool rewrite = false;
 	long ret;
 
 	ret = ksu_invoke_syscall_nr(orig_nr, regs);
-	if (ret || !static_branch_unlikely(&ksu_susfs_uname_spoof_enabled)) {
+	if (ret || !name)
 		return ret;
-	}
 
-	if (name) {
-		struct new_utsname tmp;
+	rewrite = static_branch_unlikely(&ksu_susfs_uname_spoof_enabled) ||
+		  ksu_susfs_mount_view_allowed_current();
+	if (!rewrite)
+		return ret;
+	if (copy_from_user(&tmp, name, sizeof(tmp)))
+		return ret;
+
+	if (static_branch_unlikely(&ksu_susfs_uname_spoof_enabled)) {
 		unsigned seq;
-
-		if (copy_from_user(&tmp, name, sizeof(tmp))) {
-			return ret;
-		}
 
 		do {
 			seq = read_seqbegin(&ksu_susfs_uname_lock);
@@ -2605,12 +2609,30 @@ static long __nocfi ksu_susfs_hook_uname(int orig_nr, const struct pt_regs *regs
 			strscpy(tmp.version, ksu_susfs_fake_uname.version,
 				sizeof(tmp.version));
 		} while (read_seqretry(&ksu_susfs_uname_lock, seq));
-
-		if (copy_to_user(name, &tmp, sizeof(tmp))) {
-			return -EFAULT;
-		}
 	}
 
+	if (ksu_susfs_mount_view_allowed_current())
+		tmp.nodename[0] = '\0';
+
+	if (copy_to_user(name, &tmp, sizeof(tmp)))
+		return -EFAULT;
+	return ret;
+}
+
+static long __nocfi ksu_susfs_hook_gethostname(int orig_nr,
+					       const struct pt_regs *regs)
+{
+	char __user *name = (char __user *)PT_REGS_PARM1(regs);
+	int len = (int)PT_REGS_PARM2(regs);
+	long ret;
+
+	ret = ksu_invoke_syscall_nr(orig_nr, regs);
+	if (ret || !name || len <= 0)
+		return ret;
+	if (!ksu_susfs_mount_view_allowed_current())
+		return ret;
+	if (put_user('\0', name))
+		return -EFAULT;
 	return ret;
 }
 
@@ -2872,6 +2894,15 @@ int ksu_susfs_procfs_init(void)
 		ksu_susfs_uname_hook_ready = true;
 	}
 #endif
+#ifdef __NR_gethostname
+	ret = ksu_register_syscall_hook(__NR_gethostname,
+					ksu_susfs_hook_gethostname);
+	if (ret && ret != -EEXIST) {
+		pr_warn("susfs: gethostname hook unavailable: %d\n", ret);
+	} else {
+		ksu_susfs_gethostname_hook_ready = true;
+	}
+#endif
 
 	return 0;
 }
@@ -2883,6 +2914,12 @@ void ksu_susfs_procfs_exit(void)
 		ksu_unregister_syscall_hook(__NR_uname);
 #endif
 		ksu_susfs_uname_hook_ready = false;
+	}
+	if (ksu_susfs_gethostname_hook_ready) {
+#ifdef __NR_gethostname
+		ksu_unregister_syscall_hook(__NR_gethostname);
+#endif
+		ksu_susfs_gethostname_hook_ready = false;
 	}
 
 	if (static_key_enabled(&ksu_susfs_uname_spoof_enabled)) {
