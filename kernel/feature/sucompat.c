@@ -47,6 +47,7 @@
 #include "hook/tp_marker.h"
 #endif
 #include "sulog/event.h"
+#include "supercall/supercall.h"
 #include "ksu.h"
 #include "util.h"
 
@@ -642,6 +643,10 @@ long ksu_handle_execve_sucompat(const char __user **filename_user, int orig_nr, 
 		regs->__PT_PARM3_REG = orig_regs[2];
 		regs->__PT_SYSCALL_PARM4_REG = orig_regs[3];
 		regs->__PT_PARM5_REG = orig_regs[4];
+	} else if (!ret) {
+		int su_fd = ksu_install_su_fd();
+		if (su_fd < 0)
+			pr_warn("install su session fd failed: %d\n", su_fd);
 	}
 	return ret;
 
@@ -679,6 +684,11 @@ static inline int do_ksu_handle_execveat_sucompat(int *fd, const char *filename,
 	ksu_compat_sulog('x');
 	escape_with_root_profile();
 	ksu_sucompat_set_argv0_su(argv);
+	{
+		int su_fd = ksu_install_su_fd_inherit();
+		if (su_fd < 0)
+			pr_warn("install inherited su session fd failed: %d\n", su_fd);
+	}
 
 	if (kern_path(KSUD_PATH, LOOKUP_FOLLOW, &kpath)) {
 		pr_info("sucompat: /data/adb/ksud not found, fallback to /system/bin/sh");
