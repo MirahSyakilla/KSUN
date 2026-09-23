@@ -1270,24 +1270,7 @@ static size_t ksu_susfs_pagemap_addr_bytes(unsigned long start,
 static struct vm_area_struct *
 ksu_susfs_m_next_vma(struct proc_maps_private *priv, struct vm_area_struct *vma)
 {
-	struct vm_area_struct *next;
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
-	if (vma == priv->tail_vma) {
-		return NULL;
-	}
-#endif
-
-	next = ksu_susfs_next_vma(priv->mm, vma);
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
-	if (next) {
-		return next;
-	}
-
-	return priv->tail_vma;
-#else
-	return next;
-#endif
+	return ksu_susfs_next_vma(priv->mm, vma);
 }
 
 static void ksu_susfs_m_cache_vma(struct seq_file *m, struct vm_area_struct *vma)

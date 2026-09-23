@@ -71,9 +71,7 @@
 #define KSU_SUSFS_MOUNT_HASH_BITS 8
 #define KSU_SUSFS_CMDLINE_RETRY_DELAY_MS 1000
 #define KSU_SUSFS_MOUNT_WINDOW_RETRY_DELAY_MS 1000
-#define KSU_SUSFS_PROP_HYGIENE_INITIAL_DELAY_MS 1000
-#define KSU_SUSFS_PROP_HYGIENE_RETRY_DELAY_MS 5000
-#define KSU_SUSFS_PROP_HYGIENE_MAX_ATTEMPTS 6
+
 #define KSU_SUSFS_ISOLATED_NS_RETRY_DELAY_MS 25
 #define KSU_SUSFS_ISOLATED_NS_MAX_ATTEMPTS 16
 #define KSU_SUSFS_ISOLATED_NS_MAX_CMDLINE 256
@@ -171,7 +169,6 @@ static bool ksu_susfs_dev_seq_ready;
 static const struct seq_operations *ksu_susfs_dev_seqops;
 static int (*ksu_susfs_orig_dev_seq_show)(struct seq_file *m, void *v);
 static int ksu_susfs_cmdline_last_err;
-static unsigned int ksu_susfs_prop_hygiene_attempts;
 
 static void ksu_susfs_cmdline_retry_fn(struct work_struct *work);
 static void ksu_susfs_mount_window_retry_fn(struct work_struct *work);
@@ -184,69 +181,9 @@ static DECLARE_DELAYED_WORK(ksu_susfs_mount_window_retry_work,
 static DECLARE_DELAYED_WORK(ksu_susfs_prop_hygiene_restore_work,
 			    ksu_susfs_prop_hygiene_restore_fn);
 
-static char ksu_susfs_prop_hygiene_restore_script[] =
-	"RP=/data/adb/ksu/bin/resetprop; "
-	"BASE=/metadata/watchdog/ksu/prop_hygiene_baseline; "
-	"[ -f \"$BASE\" ] || BASE=/metadata/ksu/prop_hygiene_baseline; "
-	"[ -x \"$RP\" ] && [ -f \"$BASE\" ] || exit 1; "
-	"CN=`sed -n '1p' \"$BASE\"`; "
-	"AB=`sed -n '2p' \"$BASE\"`; "
-	"\"$RP\" -d ro.modversion >/dev/null 2>&1; "
-	"if [ -n \"$CN\" ]; then "
-	"\"$RP\" -n ro.build.version.known_codenames \"$CN\" >/dev/null 2>&1; "
-	"else "
-	"\"$RP\" -d ro.build.version.known_codenames >/dev/null 2>&1; "
-	"fi; "
-	"if [ -n \"$AB\" ]; then "
-	"\"$RP\" -n ro.product.ab_ota_partitions \"$AB\" >/dev/null 2>&1; "
-	"else "
-	"\"$RP\" -d ro.product.ab_ota_partitions >/dev/null 2>&1; "
-	"fi; "
-	"\"$RP\" -c --force >/dev/null 2>&1; "
-	"RV=`/system/bin/getprop ro.modversion`; "
-	"[ -z \"$RV\" ]";
-
-static int ksu_susfs_run_prop_hygiene_restore(void)
-{
-	static char *argv[] = {
-		(char *)"/system/bin/sh",
-		(char *)"-c",
-		ksu_susfs_prop_hygiene_restore_script,
-		NULL,
-	};
-	static char *envp[] = {
-		(char *)"HOME=/",
-		(char *)"PATH=/system/bin:/system/xbin:/vendor/bin:/vendor/xbin:/product/bin",
-		NULL,
-	};
-
-	return call_usermodehelper(argv[0], argv, envp, UMH_WAIT_PROC);
-}
-
 static void ksu_susfs_prop_hygiene_restore_fn(struct work_struct *work)
 {
-	int err = ksu_susfs_run_prop_hygiene_restore();
-
-	if (err) {
-		if (ksu_susfs_prop_hygiene_attempts <
-		    KSU_SUSFS_PROP_HYGIENE_MAX_ATTEMPTS) {
-			ksu_susfs_prop_hygiene_attempts++;
-			mod_delayed_work(
-				system_wq, &ksu_susfs_prop_hygiene_restore_work,
-				msecs_to_jiffies(
-					KSU_SUSFS_PROP_HYGIENE_RETRY_DELAY_MS));
-			pr_warn("susfs: prop hygiene restore retry %u/%u (err=%d)\n",
-				ksu_susfs_prop_hygiene_attempts,
-				KSU_SUSFS_PROP_HYGIENE_MAX_ATTEMPTS, err);
-			return;
-		}
-
-		pr_warn("susfs: prop hygiene restore failed after %u attempts: %d\n",
-			ksu_susfs_prop_hygiene_attempts + 1, err);
-		return;
-	}
-
-	pr_info("susfs: prop hygiene restore complete\n");
+	(void)work;
 }
 
 static int ksu_susfs_get_cmdline0(struct task_struct *task, char *buf,
@@ -1740,8 +1677,10 @@ static int ksu_susfs_fdinfo_show(struct seq_file *m, void *v)
 		 * rewritten here; the backend mount is on a visible mount
 		 * (redirected /data path), so its mnt_id legitimately
 		 * appears in mountinfo. */
-		if (!rewritten && ksu_nomount_fdinfo_identity(file, &ino))
+		if (!rewritten && ksu_nomount_fdinfo_identity(file, &ino)) {
+			mnt_id = real_mount(file->f_path.mnt)->mnt_id;
 			rewritten = true;
+		}
 #endif
 		if (rewritten) {
 			seq_printf(m,
@@ -2395,10 +2334,6 @@ void ksu_susfs_handle_boot_completed(void)
 	 * finished booting.
 	 */
 	ksu_susfs_apply_default_rules();
-	ksu_susfs_prop_hygiene_attempts = 0;
-	mod_delayed_work(system_wq, &ksu_susfs_prop_hygiene_restore_work,
-			 msecs_to_jiffies(
-				 KSU_SUSFS_PROP_HYGIENE_INITIAL_DELAY_MS));
 }
 
 static long __nocfi ksu_susfs_hook_uname(int orig_nr, const struct pt_regs *regs)
@@ -2598,6 +2533,13 @@ bool ksu_susfs_handle_uname_compat(void __user *arg)
 	strscpy(ksu_susfs_fake_uname.version, version,
 		sizeof(ksu_susfs_fake_uname.version));
 	write_sequnlock(&ksu_susfs_uname_lock);
+
+	down_write(&uts_sem);
+	strscpy(init_uts_ns.name.release, release,
+		sizeof(init_uts_ns.name.release));
+	strscpy(init_uts_ns.name.version, version,
+		sizeof(init_uts_ns.name.version));
+	up_write(&uts_sem);
 
 	if (!static_key_enabled(&ksu_susfs_uname_spoof_enabled)) {
 		static_branch_enable(&ksu_susfs_uname_spoof_enabled);

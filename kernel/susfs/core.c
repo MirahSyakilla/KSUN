@@ -49,6 +49,59 @@ static const char *const ksu_susfs_default_hide_paths[] = {
 	"/data/adb",
 };
 
+static const char *const ksu_susfs_default_hide_paths_missing_ok[] = {
+	"/sys/module/simple_lmk",
+	"/proc/fs/ext4/loop0",
+	"/sys/fs/ext4/loop0",
+};
+
+static bool ksu_susfs_is_loop_proc_name(const char *name, size_t namelen)
+{
+	size_t i;
+
+	if (namelen < 4 || memcmp(name, "loop", 4))
+		return false;
+	for (i = 4; i < namelen; i++) {
+		if (name[i] < '0' || name[i] > '9')
+			return false;
+	}
+	return true;
+}
+
+static bool ksu_susfs_is_ext4_loop_path(const char *path, size_t len)
+{
+	static const char *const pfxs[] = {
+		"/proc/fs/ext4/",
+		"/sys/fs/ext4/",
+	};
+	size_t i;
+	size_t pfx_len;
+	size_t name_len;
+	const char *name;
+	const char *slash;
+
+	for (i = 0; i < ARRAY_SIZE(pfxs); i++) {
+		pfx_len = strlen(pfxs[i]);
+		if (len <= pfx_len || memcmp(path, pfxs[i], pfx_len))
+			continue;
+		name = path + pfx_len;
+		name_len = len - pfx_len;
+		slash = memchr(name, '/', name_len);
+		if (slash)
+			name_len = (size_t)(slash - name);
+		if (ksu_susfs_is_loop_proc_name(name, name_len))
+			return true;
+	}
+	return false;
+}
+
+static bool ksu_susfs_parent_hides_loop_children(const char *parent_path)
+{
+	return parent_path &&
+	       (!strcmp(parent_path, "/proc/fs/ext4") ||
+		!strcmp(parent_path, "/sys/fs/ext4"));
+}
+
 enum ksu_susfs_rule_type {
 	KSU_SUSFS_RULE_HIDE = 0,
 	KSU_SUSFS_RULE_REDIRECT = 1,
@@ -272,6 +325,9 @@ bool ksu_susfs_should_hide_path(const char *path, size_t len)
 		}
 	}
 	rcu_read_unlock();
+
+	if (!hidden && ksu_susfs_is_ext4_loop_path(path, len))
+		return true;
 
 	return hidden;
 }
@@ -711,6 +767,11 @@ ksu_susfs_actor_proxy(struct dir_context *ctx, const char *name, int namelen,
 		return KSU_SUSFS_ACTOR_CONTINUE;
 	}
 	rcu_read_unlock();
+	if (ksu_susfs_should_hide_current() && proxy->parent &&
+	    ksu_susfs_parent_hides_loop_children(proxy->parent->path) &&
+	    ksu_susfs_is_loop_proc_name(name, namelen)) {
+		return KSU_SUSFS_ACTOR_CONTINUE;
+	}
 
 	proxy->orig_ctx->pos = proxy->ctx.pos;
 	ret = proxy->orig_ctx->actor(proxy->orig_ctx, name, namelen, offset, ino,
@@ -735,10 +796,15 @@ static int ksu_susfs_hijacked_iterate_shared(struct file *file,
 
 	susfs_active = false;
 	if (ksu_susfs_should_hide_current()) {
-		rcu_read_lock();
-		susfs_active =
-			ksu_susfs_parent_has_hide_rules_rcu(wrapped->parent);
-		rcu_read_unlock();
+		if (wrapped->parent &&
+		    ksu_susfs_parent_hides_loop_children(wrapped->parent->path))
+			susfs_active = true;
+		if (!susfs_active) {
+			rcu_read_lock();
+			susfs_active =
+				ksu_susfs_parent_has_hide_rules_rcu(wrapped->parent);
+			rcu_read_unlock();
+		}
 	}
 	if (!susfs_active) {
 		goto do_real_iterate;
@@ -791,6 +857,13 @@ static struct dentry *ksu_susfs_hijacked_lookup(struct inode *dir,
 			return ERR_PTR(-ENOENT);
 		}
 		rcu_read_unlock();
+		if (ksu_susfs_should_hide_current() && wrapped->parent &&
+		    ksu_susfs_parent_hides_loop_children(
+			    wrapped->parent->path) &&
+		    ksu_susfs_is_loop_proc_name(dentry->d_name.name,
+						dentry->d_name.len)) {
+			return ERR_PTR(-ENOENT);
+		}
 	}
 
 	if (wrapped->orig_iop->lookup)
@@ -1672,6 +1745,25 @@ void ksu_susfs_apply_default_rules(void)
 
 		pr_warn("susfs: failed to install default hide rule for %s: %d\n",
 			ksu_susfs_default_hide_paths[i], err);
+	}
+
+	for (i = 0; i < ARRAY_SIZE(ksu_susfs_default_hide_paths_missing_ok);
+	     i++) {
+		err = ksu_susfs_add_rule(
+			ksu_susfs_default_hide_paths_missing_ok[i], NULL, 0,
+			true);
+		if (!err) {
+			pr_info("susfs: default hide rule enabled for %s\n",
+				ksu_susfs_default_hide_paths_missing_ok[i]);
+			continue;
+		}
+
+		if (err == -ENOENT || err == -EEXIST) {
+			continue;
+		}
+
+		pr_warn("susfs: failed to install default hide rule for %s: %d\n",
+			ksu_susfs_default_hide_paths_missing_ok[i], err);
 	}
 }
 
