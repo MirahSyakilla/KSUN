@@ -41,7 +41,10 @@
 #include <linux/workqueue.h>
 #include <linux/netdevice.h>
 #include <net/af_unix.h>
+#include <net/inet_sock.h>
+#include <net/inet_timewait_sock.h>
 #include <net/sock.h>
+#include <net/tcp_states.h>
 
 #include <asm/unistd.h>
 
@@ -168,6 +171,15 @@ static int (*ksu_susfs_orig_comm_open)(struct inode *inode, struct file *file);
 static bool ksu_susfs_dev_seq_ready;
 static const struct seq_operations *ksu_susfs_dev_seqops;
 static int (*ksu_susfs_orig_dev_seq_show)(struct seq_file *m, void *v);
+static bool ksu_susfs_tcp4_seq_ready;
+static const struct seq_operations *ksu_susfs_tcp4_seqops;
+static int (*ksu_susfs_orig_tcp4_seq_show)(struct seq_file *m, void *v);
+static bool ksu_susfs_tcp6_seq_ready;
+static const struct seq_operations *ksu_susfs_tcp6_seqops;
+static int (*ksu_susfs_orig_tcp6_seq_show)(struct seq_file *m, void *v);
+static bool ksu_susfs_proc_iter_ready;
+static const struct file_operations *ksu_susfs_proc_dir_fops;
+static int (*ksu_susfs_orig_proc_readdir)(struct file *file, struct dir_context *ctx);
 static int ksu_susfs_cmdline_last_err;
 
 static void ksu_susfs_cmdline_retry_fn(struct work_struct *work);
@@ -1225,6 +1237,237 @@ static void ksu_susfs_dev_seq_disable(void)
 				     &ksu_susfs_orig_dev_seq_show);
 	ksu_susfs_dev_seqops = NULL;
 	ksu_susfs_dev_seq_ready = false;
+}
+
+#define KSU_SUSFS_ADB_TCP_PORT 7777
+
+static bool ksu_susfs_name_is_loop(const char *name, int namelen)
+{
+	int i;
+
+	if (!name || namelen < 4 || memcmp(name, "loop", 4))
+		return false;
+	for (i = 4; i < namelen; i++) {
+		if (name[i] < '0' || name[i] > '9')
+			return false;
+	}
+	return true;
+}
+
+static bool ksu_susfs_tcp_local_is_adb(struct sock *sk)
+{
+	__be16 sport;
+
+	if (!sk || sk->sk_state == TCP_NEW_SYN_RECV)
+		return false;
+	if (sk->sk_state == TCP_TIME_WAIT)
+		sport = inet_twsk(sk)->tw_sport;
+	else
+		sport = inet_sk(sk)->inet_sport;
+	return sport == htons(KSU_SUSFS_ADB_TCP_PORT);
+}
+
+static int ksu_susfs_tcp_seq_show(struct seq_file *seq, void *v,
+				  int (*orig)(struct seq_file *, void *))
+{
+	if (v && v != SEQ_START_TOKEN &&
+	    ksu_uid_should_umount(current_uid().val) &&
+	    ksu_susfs_tcp_local_is_adb(v))
+		return 0;
+	if (!orig)
+		return 0;
+	return orig(seq, v);
+}
+
+static int ksu_susfs_tcp4_seq_show(struct seq_file *seq, void *v)
+{
+	return ksu_susfs_tcp_seq_show(seq, v, ksu_susfs_orig_tcp4_seq_show);
+}
+
+static int ksu_susfs_tcp6_seq_show(struct seq_file *seq, void *v)
+{
+	return ksu_susfs_tcp_seq_show(seq, v, ksu_susfs_orig_tcp6_seq_show);
+}
+
+static int ksu_susfs_tcp_seq_enable_one(const char *symbol,
+					const struct seq_operations **seqops,
+					int (*show)(struct seq_file *, void *),
+					int (**orig)(struct seq_file *, void *),
+					bool *ready, const char *what)
+{
+	unsigned long addr;
+	int err;
+
+	addr = find_kernel_symbol_exact(symbol);
+	if (!addr) {
+		pr_warn("susfs: %s unavailable\n", symbol);
+		return -ENOENT;
+	}
+
+	*seqops = (const struct seq_operations *)addr;
+	err = ksu_susfs_patch_seqop_show(*seqops, show, orig);
+	if (err) {
+		pr_warn("susfs: %s seq wrapper unavailable: %d\n", what, err);
+		*seqops = NULL;
+		return err;
+	}
+
+	*ready = true;
+	pr_info("susfs: %s seq hide ready\n", what);
+	return 0;
+}
+
+static int ksu_susfs_tcp_seq_enable(void)
+{
+	int err4, err6;
+
+	err4 = ksu_susfs_tcp_seq_enable_one("tcp4_seq_ops",
+					    &ksu_susfs_tcp4_seqops,
+					    ksu_susfs_tcp4_seq_show,
+					    &ksu_susfs_orig_tcp4_seq_show,
+					    &ksu_susfs_tcp4_seq_ready, "tcp4");
+	err6 = ksu_susfs_tcp_seq_enable_one("tcp6_seq_ops",
+					    &ksu_susfs_tcp6_seqops,
+					    ksu_susfs_tcp6_seq_show,
+					    &ksu_susfs_orig_tcp6_seq_show,
+					    &ksu_susfs_tcp6_seq_ready, "tcp6");
+	return err4 ? err4 : err6;
+}
+
+static void ksu_susfs_tcp_seq_disable(void)
+{
+	if (ksu_susfs_tcp4_seq_ready) {
+		ksu_susfs_restore_seqop_show(ksu_susfs_tcp4_seqops,
+					     &ksu_susfs_orig_tcp4_seq_show);
+		ksu_susfs_tcp4_seqops = NULL;
+		ksu_susfs_tcp4_seq_ready = false;
+	}
+	if (ksu_susfs_tcp6_seq_ready) {
+		ksu_susfs_restore_seqop_show(ksu_susfs_tcp6_seqops,
+					     &ksu_susfs_orig_tcp6_seq_show);
+		ksu_susfs_tcp6_seqops = NULL;
+		ksu_susfs_tcp6_seq_ready = false;
+	}
+}
+
+struct ksu_susfs_proc_iter_ctx {
+	struct dir_context ctx;
+	struct dir_context *orig;
+	struct file *file;
+};
+
+static bool ksu_susfs_proc_dir_is_ext4(struct file *file)
+{
+	char *buf;
+	char *path;
+	bool match = false;
+
+	if (!file)
+		return false;
+	buf = __getname();
+	if (!buf)
+		return false;
+	path = d_path(&file->f_path, buf, PATH_MAX);
+	if (!IS_ERR(path))
+		match = !strcmp(path, "/proc/fs/ext4");
+	__putname(buf);
+	return match;
+}
+
+static KSU_SUSFS_ACTOR_RET
+ksu_susfs_proc_actor(struct dir_context *ctx, const char *name, int namelen,
+		     loff_t offset, u64 ino, unsigned int d_type)
+{
+	struct ksu_susfs_proc_iter_ctx *proxy =
+		container_of(ctx, struct ksu_susfs_proc_iter_ctx, ctx);
+
+	if (ksu_susfs_path_filter_active() &&
+	    ksu_susfs_name_is_loop(name, namelen) &&
+	    ksu_susfs_proc_dir_is_ext4(proxy->file))
+		return KSU_SUSFS_ACTOR_CONTINUE;
+	if (!proxy->orig || !proxy->orig->actor)
+		return KSU_SUSFS_ACTOR_CONTINUE;
+	return proxy->orig->actor(proxy->orig, name, namelen, offset, ino,
+				  d_type);
+}
+
+static int ksu_susfs_proc_iterate(struct file *file, struct dir_context *ctx)
+{
+	struct ksu_susfs_proc_iter_ctx proxy;
+	int ret;
+
+	if (!ksu_susfs_orig_proc_readdir)
+		return -ENOTDIR;
+	if (!ctx || !ksu_susfs_path_filter_active())
+		return ksu_susfs_orig_proc_readdir(file, ctx);
+
+	memset(&proxy, 0, sizeof(proxy));
+	proxy.ctx.actor = ksu_susfs_proc_actor;
+	proxy.ctx.pos = ctx->pos;
+	proxy.orig = ctx;
+	proxy.file = file;
+	ret = ksu_susfs_orig_proc_readdir(file, &proxy.ctx);
+	ctx->pos = proxy.ctx.pos;
+	return ret;
+}
+
+static int ksu_susfs_proc_iter_enable(void)
+{
+	unsigned long addr;
+	int (*orig)(struct file *, struct dir_context *);
+	void *dst;
+	int err;
+
+	addr = find_kernel_symbol_exact("proc_dir_operations");
+	if (!addr) {
+		pr_warn("susfs: proc_dir_operations unavailable\n");
+		return -ENOENT;
+	}
+
+	ksu_susfs_proc_dir_fops = (const struct file_operations *)addr;
+	orig = READ_ONCE(ksu_susfs_proc_dir_fops->iterate_shared);
+	if (!orig)
+		return -ENOENT;
+
+	ksu_susfs_orig_proc_readdir = orig;
+	dst = (void *)&((struct file_operations *)ksu_susfs_proc_dir_fops)->iterate_shared;
+	{
+		int (*new_iter)(struct file *, struct dir_context *) =
+			ksu_susfs_proc_iterate;
+		err = ksu_patch_text(dst, &new_iter, sizeof(new_iter),
+				     KSU_PATCH_TEXT_FLUSH_DCACHE);
+	}
+	if (err) {
+		pr_warn("susfs: proc readdir wrapper unavailable: %d\n", err);
+		ksu_susfs_orig_proc_readdir = NULL;
+		ksu_susfs_proc_dir_fops = NULL;
+		return err;
+	}
+
+	ksu_susfs_proc_iter_ready = true;
+	pr_info("susfs: proc ext4 loop hide ready\n");
+	return 0;
+}
+
+static void ksu_susfs_proc_iter_disable(void)
+{
+	void *dst;
+
+	if (!ksu_susfs_proc_iter_ready || !ksu_susfs_proc_dir_fops ||
+	    !ksu_susfs_orig_proc_readdir)
+		return;
+
+	dst = (void *)&((struct file_operations *)ksu_susfs_proc_dir_fops)->iterate_shared;
+	{
+		int (*orig)(struct file *, struct dir_context *) =
+			ksu_susfs_orig_proc_readdir;
+		if (ksu_patch_text(dst, &orig, sizeof(orig),
+				   KSU_PATCH_TEXT_FLUSH_DCACHE))
+			pr_err("susfs: failed to restore proc readdir\n");
+	}
+	ksu_susfs_orig_proc_readdir = NULL;
+	ksu_susfs_proc_dir_fops = NULL;
+	ksu_susfs_proc_iter_ready = false;
 }
 
 static struct mnt_namespace *ksu_susfs_to_mnt_ns(struct ns_common *ns)
@@ -2611,6 +2854,16 @@ int ksu_susfs_procfs_init(void)
 		pr_warn("susfs: netdev seq hide unavailable: %d\n", ret);
 	}
 
+	ret = ksu_susfs_tcp_seq_enable();
+	if (ret) {
+		pr_warn("susfs: tcp seq hide unavailable: %d\n", ret);
+	}
+
+	ret = ksu_susfs_proc_iter_enable();
+	if (ret) {
+		pr_warn("susfs: proc ext4 loop hide unavailable: %d\n", ret);
+	}
+
 #ifdef __NR_uname
 	ret = ksu_register_syscall_hook(__NR_uname, ksu_susfs_hook_uname);
 	if (ret && ret != -EEXIST) {
@@ -2639,6 +2892,8 @@ void ksu_susfs_procfs_exit(void)
 	ksu_susfs_unix_seq_disable();
 	ksu_susfs_comm_disable();
 	ksu_susfs_dev_seq_disable();
+	ksu_susfs_tcp_seq_disable();
+	ksu_susfs_proc_iter_disable();
 	ksu_susfs_cmdline_runtime_disable();
 	ksu_susfs_cmdline_ready = false;
 	cancel_delayed_work_sync(&ksu_susfs_prop_hygiene_restore_work);
