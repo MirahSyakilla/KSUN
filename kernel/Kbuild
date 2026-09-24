@@ -75,9 +75,12 @@ kernelsu-objs += hook/arm64/bl_manifest_gen.o
 # absent).  The seed uses policy-derived enums only; no census is required.
 ifeq ($(wildcard $(KSU_BL_GEN_DIR)/bl_manifest_gen.c),)
 $(KSU_BL_GEN_DIR)/bl_manifest_gen.c $(KSU_BL_GEN_DIR)/bl_manifest_ids.h:
-	$(Q)mkdir -p $(KSU_BL_GEN_DIR)
+	$(Q)mkdir -p $(KSU_BL_GEN_DIR) $(objtree)/.ksu-bl
+	$(Q)if [ ! -s $(objtree)/.ksu-bl/nonce.seed ]; then \
+		printf '0x%s' $$(od -An -N4 -tx4 /dev/urandom | tr -d ' \n') > $(objtree)/.ksu-bl/nonce.seed; \
+	fi
 	$(Q)$(PYTHON3) $(srctree)/drivers/kernelsu/../tools/bl-analyzer/bl_analyzer_v2.py \
-		--bootstrap --nonce 0x$$(od -An -N4 -tx4 /dev/urandom | tr -d ' \n') \
+		--bootstrap --nonce $$(cat $(objtree)/.ksu-bl/nonce.seed) \
 		--output-ids $(KSU_BL_GEN_DIR)/bl_manifest_ids.h \
 		--output-object $(KSU_BL_GEN_DIR)/bl_manifest_gen.c
 endif

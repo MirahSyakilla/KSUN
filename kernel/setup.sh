@@ -65,6 +65,7 @@ perform_cleanup() {
     if [ -d "$GKI_ROOT/$KSU_DIR" ]; then
         rm -rf "$GKI_ROOT/$KSU_DIR" && echo "[-] $KSU_DIR directory deleted."
     fi
+    [ -f "$GKI_ROOT/arch/arm64/Makefile.postlink" ] && rm -f "$GKI_ROOT/arch/arm64/Makefile.postlink" && echo "[-] arch/arm64/Makefile.postlink removed."
 }
 
 # Sets up or update KernelSU-Next environment
@@ -90,6 +91,14 @@ setup_kernelsu() {
     # Add entries in Makefile and Kconfig if not already existing
     grep -q "kernelsu" "$DRIVER_MAKEFILE" || printf "\nobj-\$(CONFIG_KSU) += kernelsu/\n" >> "$DRIVER_MAKEFILE" && echo "[+] Modified Makefile."
     grep -q "source \"drivers/kernelsu/Kconfig\"" "$DRIVER_KCONFIG" || sed -i "/endmenu/i\source \"drivers/kernelsu/Kconfig\"" "$DRIVER_KCONFIG" && echo "[+] Modified Kconfig."
+
+    # The branch-link two-stage coordinator is discovered by the top-level
+    # kernel Makefile through arch/arm64/Makefile.postlink.  It must exist
+    # before make starts, so it is generated here (and removed by --cleanup);
+    # the hook itself self-guards on CONFIG_KSU_BL_GENERATED.
+    if [ -d "$GKI_ROOT/arch/arm64" ]; then
+        cp "$GKI_ROOT/$KSU_DIR/kernel/build/Makefile.postlink" "$GKI_ROOT/arch/arm64/Makefile.postlink" && echo "[+] Installed arch/arm64/Makefile.postlink."
+    fi
     echo '[+] Done.'
 }
 

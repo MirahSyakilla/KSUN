@@ -171,7 +171,7 @@ ROUTES: List[Route] = [
         id="dpath/d_path", kind="manifest",
         cond="CONFIG_KSU_HOOKLESS_NOMOUNT", group="dpath",
         profile="lisa-5.4",
-        census_expected_sites=21,
+        census_expected_sites=22,
         ksu_internal="explicit",
         targets=(Target("d_path", "ksu_do_dpath", "d_path_fn"),),
         callers=(
@@ -190,6 +190,8 @@ ROUTES: List[Route] = [
             Caller("ksu_install_rc_hook", REQUIRED, 1, owner=KSU),
             Caller("ksu_sys_fstat", REQUIRED, 1, owner=KSU),
             Caller("ksu_susfs_fdinfo_show", REQUIRED, 1, owner=KSU),
+            Caller("ksu_susfs_proc_actor", REQUIRED, 1, owner=KSU,
+                   note="d_path call in inlined ksu_susfs_proc_dir_is_ext4"),
             Caller("ksu_nomount_build_path_from_dfd", REQUIRED, 2, owner=KSU),
             Caller("ksu_nomount_handle_fd_getattr", REQUIRED, 1, owner=KSU),
             Caller("ksu_nomount_handle_statfs_path", REQUIRED, 1, owner=KSU),

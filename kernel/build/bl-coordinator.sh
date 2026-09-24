@@ -30,6 +30,8 @@ GEN_SRC="${KSU_GEN_SRC:?}"
 GEN_IDS="${KSU_GEN_IDS:?}"
 ANALYZER="${KSU_ANALYZER:?}"
 MAKE="${KSU_MAKE:?}"
+READELF="${KSU_READELF:-llvm-readelf}"
+NM="${KSU_NM:-llvm-nm}"
 
 VMLINUX="$OBJTREE/vmlinux"
 SYSMAP="$OBJTREE/System.map"
@@ -75,7 +77,7 @@ mkdir -p "$TX" || fail "cannot create $TX"
 echo "$NONCE" > "$TX/stage0"
 echo "final" > "$STAGE_DIR/stage-guard"
 
-ANALYZER_COMMON="--config $OBJTREE/.config --srctree $SRCTREE --compat-execveat --nonce $NONCE"
+ANALYZER_COMMON="--config $OBJTREE/.config --srctree $SRCTREE --compat-execveat --nonce $NONCE --readelf $READELF --nm $NM"
 
 # ---- stage 1: analyze the bootstrap link --------------------------------------
 log "stage 1: analyzing bootstrap vmlinux"

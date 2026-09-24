@@ -70,6 +70,10 @@ def log(msg):
 
 
 def run_tool(argv, what):
+    # llvm-readelf/llvm-nm reject a GNU-style "--" end-of-options marker.  The
+    # paths passed here are absolute and never begin with "-", so dropping it
+    # keeps both toolchains happy.
+    argv = [a for a in argv if a != "--"]
     try:
         r = subprocess.run(argv, capture_output=True, text=True)
     except FileNotFoundError:
@@ -867,6 +871,7 @@ def analyze(args):
 
     routes_result = []
     any_drift = False
+    drift_details = []
     for route in P.enabled_routes(ctx):
         target_names = []
         for t in route.targets:
@@ -1001,6 +1006,7 @@ def analyze(args):
             any_drift = True
             for f in route_fail[:10]:
                 log("%s: %s" % (route.id, f))
+                drift_details.append("%s: %s" % (route.id, f))
         policy_sites = sum(r["sites"] for r in rows
                            if r["classification"] != P.UNSUPPORTED
                            and not r.get("acknowledged"))
@@ -1041,8 +1047,9 @@ def analyze(args):
 
     if any_drift:
         raise Fail(EXIT_DRIFT, "POLICY_DRIFT",
-                   "%d route(s) failed policy validation" %
-                   sum(1 for r in routes_result if r["drift"] != "DRIFT_NONE"))
+                   "%d route(s) failed policy validation: %s" %
+                   (sum(1 for r in routes_result if r["drift"] != "DRIFT_NONE"),
+                    "; ".join(drift_details[:10])))
 
     stamp = {
         "schema_version": P.SCHEMA_VERSION,
@@ -1125,6 +1132,10 @@ def main():
                               emit_bootstrap(nonce, hooks, slots))
         log("bootstrap manifest emitted")
         sys.exit(0)
+
+    if not args.vmlinux:
+        log("--vmlinux is required")
+        sys.exit(EX_USAGE)
 
     try:
         stamp, routes_result, payload = analyze(args)
