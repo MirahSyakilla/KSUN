@@ -1133,6 +1133,9 @@ static bool ksu_branch_link_patch_dpath_family(void)
 		{ "ksu_install_rc_hook", KSU_BL_SITE_REQUIRED, 1 },
 		{ "ksu_sys_fstat", KSU_BL_SITE_REQUIRED, 1 },
 		{ "ksu_susfs_fdinfo_show", KSU_BL_SITE_REQUIRED, 1 },
+		/* KSU ext4 /proc readdir filter: d_path() in the inlined
+		 * ksu_susfs_proc_dir_is_ext4() helper. */
+		{ "ksu_susfs_proc_actor", KSU_BL_SITE_REQUIRED, 1 },
 		{ "ksu_nomount_build_path_from_dfd", KSU_BL_SITE_REQUIRED, 2 },
 		{ "ksu_nomount_handle_fd_getattr", KSU_BL_SITE_REQUIRED, 1 },
 		{ "ksu_nomount_handle_statfs_path", KSU_BL_SITE_REQUIRED, 1 },
@@ -2656,7 +2659,10 @@ static bool ksu_branch_link_patch_susfs(void)
 		 * profile below; the old symbol-scoped probe covered them. */
 		{ "do_open_execat", KSU_BL_SITE_REQUIRED, 1 },
 		{ "file_open_name", KSU_BL_SITE_REQUIRED, 1 },
-		{ "open_exec", KSU_BL_SITE_REQUIRED, 1 },
+		/* open_exec() calls do_open_execat(); it holds no direct
+		 * do_filp_open site on 5.4 (objdump-verified 0 sites), so it
+		 * must stay optional or the family fails closed. */
+		{ "open_exec", KSU_BL_SITE_OPTIONAL, 1 },
 	};
 #else
 	static const struct ksu_bl_manifest_caller do_filp_open_callers[] = {
@@ -2675,7 +2681,9 @@ static bool ksu_branch_link_patch_susfs(void)
 		 * helper; both flow through the same redirect wrapper. */
 		{ "do_open_execat", KSU_BL_SITE_REQUIRED, 1 },
 		{ "file_open_name", KSU_BL_SITE_REQUIRED, 1 },
-		{ "open_exec", KSU_BL_SITE_REQUIRED, 1 },
+		/* open_exec() calls do_open_execat(); no direct do_filp_open
+		 * site on 5.4, so optional (required would fail the family). */
+		{ "open_exec", KSU_BL_SITE_OPTIONAL, 1 },
 	};
 #endif
 	static const struct ksu_bl_manifest_caller vfs_create_mount_callers[] = {

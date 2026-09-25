@@ -410,6 +410,18 @@ ROUTES: List[Route] = [
             Caller("do_sys_openat2", UNSUPPORTED, 0, cond="!KSU_HAS_OPENAT2"),
         ),
     ),
+    # -- unix abstract-socket hide ------------------------------------------------
+    Route(
+        id="susfs/unix_find_other", kind="routes",
+        cond="CONFIG_KSU_HOOKLESS_SUSFS", group="unix-abstract",
+        targets=(Target("unix_find_other", "ksu_unix_find_other",
+                        "unix_find_other_fn"),),
+        callers=(
+            Caller("unix_stream_connect", OPTIONAL, 1),
+            Caller("unix_dgram_connect", OPTIONAL, 1),
+            Caller("unix_dgram_sendmsg", OPTIONAL, 1),
+        ),
+    ),
     # -- getattr interior ---------------------------------------------------------
     Route(
         id="susfs/vfs_getattr_nosec", kind="manifest",
