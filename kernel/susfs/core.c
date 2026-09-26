@@ -276,6 +276,54 @@ bool ksu_susfs_path_filter_active(void)
 	return ksu_susfs_should_hide_current();
 }
 
+bool ksu_susfs_inode_identity_is_hidden(unsigned long ino, dev_t dev)
+{
+	struct ksu_susfs_rule *rule;
+	int bkt;
+	bool hidden = false;
+
+	if (!ino || !ksu_susfs_path_filter_active())
+		return false;
+
+	rcu_read_lock();
+	hash_for_each_rcu(ksu_susfs_rules_ht, bkt, rule, path_node) {
+		if (rule->type == KSU_SUSFS_RULE_HIDE && rule->target_ino &&
+		    rule->target_ino == ino && rule->target_dev == dev) {
+			hidden = true;
+			break;
+		}
+	}
+	rcu_read_unlock();
+	return hidden;
+}
+
+/*
+ * True when the object a syscall just stat()ed is a hidden inode. Used at the
+ * VFS getattr/statfs/faccessat boundary so a hidden path yields -ENOENT from
+ * every route (literal name, /proc/<pid>/root, dirfd-relative, O_PATH, hardlink
+ * or bind-mount alias) rather than a raw -EACCES or a successful stat. Keyed on
+ * resolved inode identity, so it is immune to dcache state and to the fact that
+ * the hide rule itself warms a positive dentry when it resolves the path.
+ */
+/*
+ * Neutral placeholder emitted by d_path() for a hidden inode, so that a caller
+ * holding an fd to a hidden object learns nothing about its real location.
+ * Deliberately a plausible-but-generic name rather than the true path.
+ */
+const char *ksu_susfs_hidden_dpath_name(void)
+{
+	if (!ksu_susfs_path_filter_active())
+		return NULL;
+	return "/data/.hidden";
+}
+
+bool ksu_susfs_stat_should_be_enoent(const struct kstat *stat)
+{
+	if (!stat)
+		return false;
+	return ksu_susfs_inode_identity_is_hidden(stat->ino, stat->dev);
+}
+
 bool ksu_susfs_inode_is_hidden(const struct inode *inode)
 {
 	struct ksu_susfs_rule *rule;

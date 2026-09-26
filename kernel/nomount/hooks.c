@@ -303,7 +303,31 @@ static int ksu_nomount_permission_entry(struct kretprobe_instance *ri,
 static int ksu_nomount_permission_handler(struct kretprobe_instance *ri,
 						 struct pt_regs *regs)
 {
-	(void)ri;
+	struct ksu_nomount_permission_ctx *ctx =
+		(struct ksu_nomount_permission_ctx *)ri->data;
+
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
+	/*
+	 * Defence in depth for builds that fall back to kretprobes instead of
+	 * branch-link (on this device branch-link wins and this path is retired
+	 * at runtime, but it must stay correct for any tree where it is live).
+	 *
+	 * A hidden inode must surface as -ENOENT so it is indistinguishable from
+	 * a genuinely absent path, rather than whatever the underlying check
+	 * returned (typically -EACCES) -- an app could otherwise fingerprint a
+	 * hidden path from the errno alone. This mirrors the branch-link wrapper
+	 * in hook/arm64/branch_link_hook.c (ksu_do_inode_permission) so both
+	 * mechanisms behave identically.
+	 *
+	 * Evaluated before the unconditional allow below so the ENOENT is not
+	 * overwritten, and gated on ksu_susfs_path_filter_active() inside the
+	 * helper so root and the KSU manager domain are unaffected.
+	 */
+	if (ctx->inode && ksu_susfs_inode_is_hidden(ctx->inode)) {
+		regs_set_return_value(regs, (unsigned long)-ENOENT);
+		return 0;
+	}
+#endif
 	regs_set_return_value(regs, 0);
 	return 0;
 }
