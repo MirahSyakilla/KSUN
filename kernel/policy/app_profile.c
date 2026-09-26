@@ -205,12 +205,22 @@ int escape_with_root_profile(void)
 
     disable_seccomp();
 
-#if defined(CONFIG_KSU_HOOK_CORE) && \
-	!defined(CONFIG_KSU_TAMPER_SYSCALL_TABLE)
+#if defined(CONFIG_KSU_HOOK_CORE)
+	/*
+	 * FLAG_KSU_NO_NEW_PRIVS is pure thread-flag manipulation and has no
+	 * dependency on the tracepoint mechanism, so it must NOT be gated on
+	 * !CONFIG_KSU_TAMPER_SYSCALL_TABLE. Gating it there compiled the
+	 * enforcement out whenever the syscall table is tampered (the recommended
+	 * config), leaving a root profile the admin marked non-re-elevatable
+	 * silently unenforced while the manager still displayed it as active.
+	 */
 	if (profile->flags & FLAG_KSU_NO_NEW_PRIVS) {
 		set_thread_flag(TIF_KSU_DISABLE_ESCAPE_WITH_ROOT);
 	}
+#endif
 
+#if defined(CONFIG_KSU_HOOK_CORE) && \
+	!defined(CONFIG_KSU_TAMPER_SYSCALL_TABLE)
     for_each_thread (p, t) {
         ksu_set_task_tracepoint_flag(t);
     }

@@ -682,12 +682,26 @@ static inline int do_ksu_handle_execveat_sucompat(int *fd, const char *filename,
 		return 0;
 
 	ksu_compat_sulog('x');
-	escape_with_root_profile();
-	ksu_sucompat_set_argv0_su(argv);
 	{
-		int su_fd = ksu_install_su_fd_inherit();
-		if (su_fd < 0)
-			pr_warn("install inherited su session fd failed: %d\n", su_fd);
+		/*
+		 * escape_with_root_profile() returns -ENOMEM (or another errno) on
+		 * failure and 0 only on success. The old code discarded the result and
+		 * installed the su-session fd unconditionally, so a failed escape left
+		 * the task non-root while still holding a root-session capability -- the
+		 * inverted state, and the more dangerous half of the non-CLOEXEC fd
+		 * issue. Capture it and skip the fd install on failure, matching the
+		 * sibling handler above.
+		 */
+		int esc = escape_with_root_profile();
+
+		ksu_sucompat_set_argv0_su(argv);
+		if (!esc) {
+			int su_fd = ksu_install_su_fd_inherit();
+			if (su_fd < 0)
+				pr_warn("install inherited su session fd failed: %d\n", su_fd);
+		} else {
+			pr_warn("escape_with_root_profile failed: %d, not installing su session fd\n", esc);
+		}
 	}
 
 	if (kern_path(KSUD_PATH, LOOKUP_FOLLOW, &kpath)) {

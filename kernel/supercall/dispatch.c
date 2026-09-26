@@ -45,6 +45,26 @@ static int do_get_info(void __user *arg)
 {
     struct ksu_get_info_cmd cmd = { .version = KERNEL_SU_VERSION, .flags = 0 };
 
+    /*
+     * Hiding hardening: an unprivileged app can obtain a supercall fd via the
+     * ungated KSU_INSTALL_MAGIC2 reboot() path, so GET_INFO must not confirm
+     * that KernelSU exists, disclose its version/features, or disclose manager
+     * status / safe-mode state to a non-manager caller. We deliberately keep
+     * the call succeeding (return 0) and return a benign "no KSU" shape rather
+     * than rejecting, so a third-party manager probing before it is crowned
+     * degrades quietly instead of hard-failing. Root and the crowned manager
+     * still get the full reply.
+     */
+    if (current_uid().val != 0 && !is_manager()) {
+        cmd.version = 0;
+        cmd.flags = 0;
+        cmd.features = 0;
+        cmd.uapi_version = 0;
+        if (copy_to_user(arg, &cmd, sizeof(cmd)))
+            return -EFAULT;
+        return 0;
+    }
+
 #ifdef MODULE
     cmd.flags |= KSU_GET_INFO_FLAG_LKM;
     if (ksu_bundled)
@@ -77,6 +97,16 @@ static int do_get_info(void __user *arg)
 static int do_get_info_legacy(void __user *arg)
 {
     struct ksu_get_info_legacy_cmd cmd = { .version = KERNEL_SU_VERSION, .flags = 0 };
+
+    /* Same hiding hardening as do_get_info: see the comment there. */
+    if (current_uid().val != 0 && !is_manager()) {
+        cmd.version = 0;
+        cmd.flags = 0;
+        cmd.features = 0;
+        if (copy_to_user(arg, &cmd, sizeof(cmd)))
+            return -EFAULT;
+        return 0;
+    }
 
 #ifdef MODULE
     cmd.flags |= KSU_GET_INFO_FLAG_LKM;
@@ -164,6 +194,19 @@ static int do_set_sepolicy(void __user *arg)
 static int do_check_safemode(void __user *arg)
 {
     struct ksu_check_safemode_cmd cmd;
+
+    /*
+     * Hiding hardening: safe-mode state is a boot-integrity signal and must
+     * not be readable by an arbitrary app. Return a benign "not in safe mode"
+     * to non-manager/non-root callers rather than rejecting, consistent with
+     * do_get_info.
+     */
+    if (current_uid().val != 0 && !is_manager()) {
+        cmd.in_safe_mode = 0;
+        if (copy_to_user(arg, &cmd, sizeof(cmd)))
+            return -EFAULT;
+        return 0;
+    }
 
     cmd.in_safe_mode = ksu_is_safe_mode();
 
@@ -995,8 +1038,23 @@ long ksu_supercall_handle_ioctl(const struct file *filp, unsigned int cmd, void 
 
     for (i = 0; ksu_ioctl_handlers[i].handler; i++) {
         if (cmd == ksu_ioctl_handlers[i].cmd) {
+            /*
+             * The su-session fd is deliberately NOT O_CLOEXEC: it must survive
+             * execve so that `su` can hand off to ksud. The consequence is that
+             * the KSU_DRIVER_PERMISSION_SU_SESSION bit is inherited by every
+             * descendant of the su session, including a process that later
+             * drops to a lower uid -- so a bare session-bit check would let a
+             * de-privileged descendant satisfy a root/manager-gated command.
+             * Require the session bit AND current root: a descendant that kept
+             * uid 0 is legitimately still root, while one that dropped
+             * privileges loses the capability along with them.
+             */
+            bool su_session_ok = ksu_ioctl_handlers[i].allow_su_session &&
+                                 ksu_is_su_session_fd(filp) &&
+                                 current_uid().val == 0;
+
             if (ksu_ioctl_handlers[i].perm_check && !ksu_ioctl_handlers[i].perm_check() &&
-                !(ksu_ioctl_handlers[i].allow_su_session && ksu_is_su_session_fd(filp))) {
+                !su_session_ok) {
                 pr_warn("ksu ioctl: permission denied for cmd=0x%x uid=%d\n", cmd, current_uid().val);
                 return -EPERM;
             }
