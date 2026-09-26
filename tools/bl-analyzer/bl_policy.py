@@ -263,9 +263,20 @@ ROUTES: List[Route] = [
             Caller("do_file_open_root", REQUIRED, 1),
             Caller("kern_path_create", REQUIRED, 1),
             Caller("fs_lookup_param", REQUIRED, 1),
-            Caller("ksu_nomount_rebase_execve_filename", REQUIRED, 1, owner=KSU),
             Caller("ksu_do_filp_open", REQUIRED, 2, owner=KSU),
             Caller("ksu_susfs_open_redirect_getname", REQUIRED, 1, owner=KSU),
+            # ksu_nomount_rebase_execve_filename() is a plain static helper
+            # called from four exec wrappers. On the legacy layout the analyzer
+            # sees it as its own frame; on the common-exec layout the compiler
+            # inlines it into ksu_do_execveat_common(), so the getname_kernel
+            # call site is attributed to that host instead. Only one of the two
+            # is ever present, so they are mutually exclusive on cond.
+            Caller("ksu_nomount_rebase_execve_filename", REQUIRED, 1, owner=KSU,
+                   cond="!KSU_EXECVE_COMMON_HELPER"),
+            Caller("ksu_do_execveat_common", REQUIRED, 1, owner=KSU,
+                   cond="KSU_EXECVE_COMMON_HELPER",
+                   note="host of the inlined ksu_nomount_rebase_execve_filename() "
+                        "on the common exec profile"),
         ),
     ),
     Route(
@@ -497,6 +508,16 @@ ROUTES: List[Route] = [
                    cond="KSU_HAS_COMPAT_EXECVEAT"),
             Caller("__arm64_compat_sys_execveat", UNSUPPORTED, 0,
                    cond="CONFIG_COMPAT && !KSU_HAS_COMPAT_EXECVEAT"),
+            # fs/exec.c reaches the common helper through four sites. The
+            # do_execveat()/compat_do_execveat() wrappers are static and get
+            # inlined into their __arm64_sys_* callers, so the analyzer sees
+            # those three syscall wrappers directly -- but do_execve() is
+            # non-static and stays a distinct frame, so its BL is attributed
+            # to do_execve itself. Required on this base (5.4 lahaina/yupik).
+            Caller("do_execve", REQUIRED, 1,
+                   note="non-static kernel caller of do_execveat_common; "
+                        "static do_execveat/compat wrappers inline into the "
+                        "syscall entry points listed above"),
         ),
     ),
     Route(

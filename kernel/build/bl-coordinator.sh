@@ -77,7 +77,34 @@ mkdir -p "$TX" || fail "cannot create $TX"
 echo "$NONCE" > "$TX/stage0"
 echo "final" > "$STAGE_DIR/stage-guard"
 
-ANALYZER_COMMON="--config $OBJTREE/.config --srctree $SRCTREE --compat-execveat --nonce $NONCE --readelf $READELF --nm $NM"
+ANALYZER_COMMON="--config $OBJTREE/.config --srctree $SRCTREE --nonce $NONCE --readelf $READELF --nm $NM"
+
+# Source-shape probes. These MUST mirror the Kbuild probes in
+# drivers/kernelsu/Kbuild exactly, otherwise the analyzer validates routes for a
+# different exec-helper ABI than the compiler actually built and stage 1 fails
+# with POLICY_DRIFT on the exec routes.
+#
+# Kbuild: grep -Fq "__do_execve_file" fs/exec.c        -> KSU_EXECVE_LEGACY_HELPER
+#         else grep -Fq "do_execveat_common" fs/exec.c -> KSU_EXECVE_COMMON_HELPER
+#         grep -Fq "__NR_execveat" unistd32.h          -> KSU_HAS_COMPAT_EXECVEAT
+#
+# Note this is deliberately NOT derived from LINUX_VERSION_CODE: exec helper
+# layout is backported independently of the nominal kernel version (5.4 trees
+# can carry the common helper, and vice versa).
+if grep -Fq "__do_execve_file" "$SRCTREE/fs/exec.c" 2>/dev/null; then
+	log "probe: exec helper layout = legacy"
+elif grep -Fq "do_execveat_common" "$SRCTREE/fs/exec.c" 2>/dev/null; then
+	log "probe: exec helper layout = common (--exec-common)"
+	ANALYZER_COMMON="$ANALYZER_COMMON --exec-common"
+else
+	log "probe: exec helper layout undetermined; assuming legacy"
+fi
+if grep -Fq "__NR_execveat" "$SRCTREE/arch/arm64/include/asm/unistd32.h" 2>/dev/null; then
+	log "probe: compat execveat present (--compat-execveat)"
+	ANALYZER_COMMON="$ANALYZER_COMMON --compat-execveat"
+else
+	log "probe: compat execveat absent"
+fi
 
 # ---- stage 1: analyze the bootstrap link --------------------------------------
 log "stage 1: analyzing bootstrap vmlinux"

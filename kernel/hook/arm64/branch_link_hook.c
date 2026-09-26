@@ -1082,6 +1082,24 @@ static char *__nocfi ksu_do_dpath(const struct path *path, char *buf,
 	ret = orig_d_path(path, buf, buflen);
 	if (ksu_nomount_bypass_active())
 		return ret;
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
+	/*
+	 * A HIDE rule is not in the redirect tables below, so a caller holding
+	 * any fd to a hidden object (e.g. an O_PATH fd obtained before the
+	 * stat-family ENOENT substitutions existed) would still see the literal
+	 * path via readlink("/proc/self/fd/N") and its real inode via
+	 * fstat(N). Scrub the emitted name so the object cannot be located.
+	 * Defence in depth: with the stat substitutions in place this is
+	 * unreachable for a filtered app, but it must not depend on that.
+	 */
+	if (path && ksu_susfs_inode_is_hidden(d_backing_inode(path->dentry))) {
+		const char *hidden_name = ksu_susfs_hidden_dpath_name();
+
+		if (hidden_name && buflen > 0)
+			return scnprintf(buf, buflen, "%s", hidden_name);
+		return ERR_PTR(-ENOENT);
+	}
+#endif
 	if (!ksu_nomount_active_for_current() &&
 	    !ksu_susfs_open_redirect_active())
 		return ret;
@@ -1330,8 +1348,23 @@ static bool ksu_branch_link_patch_getname_kernel_family(void)
 		{ "do_file_open_root", KSU_BL_SITE_REQUIRED, 1 },
 		{ "kern_path_create", KSU_BL_SITE_REQUIRED, 1 },
 		{ "fs_lookup_param", KSU_BL_SITE_REQUIRED, 1 },
+		/* ksu_nomount_rebase_execve_filename() is a plain static helper
+		 * called from four exec wrappers. On the legacy exec layout it
+		 * survives as its own frame and owns the getname_kernel BL site.
+		 * Under KSU_BL_EXEC_COMMON_PROFILE the compiler inlines it into
+		 * ksu_do_execveat_common(), so the symbol resolves to 0x0 and the
+		 * host owns the site instead. Requiring the inlined-away name made
+		 * the runtime report "required getname/getname_kernel caller
+		 * ksu_nomount_rebase_execve_filename unavailable" and silently drop
+		 * the hookless NoMount execve-filename hook. Exactly one of the two
+		 * names can be present; keep this in sync with the exec-profile
+		 * conditionals in tools/bl-analyzer/bl_policy.py. */
+#if KSU_BL_EXEC_COMMON_PROFILE
+		{ "ksu_do_execveat_common", KSU_BL_SITE_REQUIRED, 1 },
+#else
 		{ "ksu_nomount_rebase_execve_filename", KSU_BL_SITE_REQUIRED,
 		  1 },
+#endif
 		{ "ksu_do_filp_open", KSU_BL_SITE_REQUIRED, 2 },
 		{ "ksu_susfs_open_redirect_getname", KSU_BL_SITE_REQUIRED, 1 },
 	};
@@ -1571,6 +1604,29 @@ static bool ksu_bl_has_conflict(void)
 	return false;
 }
 
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
+/*
+ * Resolve a userspace pathname purely to obtain its inode identity, so the
+ * faccessat/access() wrappers can decide whether the target is a hidden path.
+ * faccessat() itself hands back only a boolean-ish long, so the inode has to be
+ * looked up separately. Any lookup failure means "not a hidden object" and
+ * leaves the original faccessat result untouched.
+ */
+static bool ksu_bl_faccessat_target_is_hidden(int dfd,
+					      const char __user *filename)
+{
+	struct path path;
+	bool hidden = false;
+
+	if (user_path_at(dfd, filename, LOOKUP_FOLLOW, &path))
+		return false;
+	if (ksu_susfs_inode_is_hidden(d_backing_inode(path.dentry)))
+		hidden = true;
+	path_put(&path);
+	return hidden;
+}
+#endif
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0) || defined(KSU_HAS_FACCESSAT2)
 static long (*do_faccessat_fn)(int dfd, const char __user *filename, int mode,
 			       int flags);
@@ -1617,6 +1673,12 @@ static long __nocfi ksu_do_faccessat(int dfd, const char __user *filename,
 #endif
 	if (old_cred)
 		revert_creds(old_cred);
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
+	/* access(F_OK) and friends leak existence for a hidden path; force the
+	 * same -ENOENT the stat family now returns so all routes agree. */
+	if (!ret && ksu_bl_faccessat_target_is_hidden(dfd, filename))
+		return -ENOENT;
+#endif
 	return ret;
 }
 #else
@@ -1653,6 +1715,11 @@ static long __nocfi ksu_do_faccessat(int dfd, const char __user *filename,
 #endif
 	if (old_cred)
 		revert_creds(old_cred);
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
+	/* Hidden path -> ENOENT, matching the stat family. */
+	if (!ret && ksu_bl_faccessat_target_is_hidden(dfd, filename))
+		return -ENOENT;
+#endif
 	return ret;
 }
 #endif
@@ -1800,6 +1867,11 @@ static int __nocfi ksu_vfs_fstatat(int dfd, const char __user *filename,
 #endif
 	if (old_cred)
 		revert_creds(old_cred);
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
+	/* Hidden inode -> ENOENT, not a raw EACCES/stat success. */
+	if (!ret && ksu_susfs_stat_should_be_enoent(stat))
+		ret = -ENOENT;
+#endif
 	ksu_bl_handle_stat_result(stat, ret);
 	return ret;
 }
@@ -1901,6 +1973,11 @@ static int __nocfi ksu_vfs_statx(int dfd, struct filename *filename,
 	if (rebased)
 		putname(rebased);
 #endif
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
+	/* Hidden inode -> ENOENT, not a raw EACCES/stat success. */
+	if (!ret && ksu_susfs_stat_should_be_enoent(stat))
+		ret = -ENOENT;
+#endif
 	ksu_bl_handle_stat_result(stat, ret);
 	return ret;
 }
@@ -1938,6 +2015,11 @@ static int __nocfi ksu_vfs_statx(int dfd, const char __user *filename,
 #endif
 	if (old_cred)
 		revert_creds(old_cred);
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
+	/* Hidden inode -> ENOENT, not a raw EACCES/stat success. */
+	if (!ret && ksu_susfs_stat_should_be_enoent(stat))
+		ret = -ENOENT;
+#endif
 	ksu_bl_handle_stat_result(stat, ret);
 	return ret;
 }
@@ -1993,6 +2075,12 @@ static int __nocfi ksu_vfs_getattr_nosec(const struct path *path,
 		return -EOPNOTSUPP;
 	ret = vfs_getattr_nosec_fn(path, stat, request_mask, query_flags);
 
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
+	/* Hidden inode -> ENOENT before any statfs/getattr post-processing can
+	 * emit metadata for it (covers /proc/<pid>/root and O_PATH aliases). */
+	if (!ret && path && ksu_susfs_inode_is_hidden(d_backing_inode(path->dentry)))
+		ret = -ENOENT;
+#endif
 	ksu_susfs_handle_vfs_getattr_nosec(path, stat, ret);
 	return ret;
 }
@@ -2039,6 +2127,11 @@ static int __nocfi ksu_vfs_fstat(unsigned int fd, struct kstat *stat)
 	/* This 5.4 LTO tree emits vfs_fstat() as a private helper that performs
 	 * getattr through an indirect inode-operation call.  There is therefore no
 	 * vfs_getattr_nosec branch for the old fd-stat patch to replace. */
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
+	/* Hidden inode -> ENOENT, not a raw EACCES/stat success. */
+	if (!ret && ksu_susfs_stat_should_be_enoent(stat))
+		ret = -ENOENT;
+#endif
 	ksu_bl_handle_stat_result(stat, ret);
 #ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	if (!ret && ksu_nomount_active_for_current()) {
@@ -2088,6 +2181,11 @@ retry:
 			return -EOPNOTSUPP;
 		}
 		ret = vfs_statfs_fn(&path, statfs);
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
+		/* Hidden inode -> ENOENT: statfs otherwise leaks existence. */
+		if (!ret && ksu_susfs_inode_is_hidden(d_backing_inode(path.dentry)))
+			ret = -ENOENT;
+#endif
 		ksu_handle_statfs_result(&path, statfs, ret);
 		path_put(&path);
 		if (retry_estale(ret, lookup_flags)) {
@@ -2109,6 +2207,11 @@ static int __nocfi ksu_fd_statfs(int fd, struct kstatfs *statfs)
 			return -EOPNOTSUPP;
 		}
 		ret = vfs_statfs_fn(&f.file->f_path, statfs);
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
+		/* Hidden inode -> ENOENT, not a raw EACCES/statfs success. */
+		if (!ret && ksu_susfs_inode_is_hidden(d_backing_inode(f.file->f_path.dentry)))
+			ret = -ENOENT;
+#endif
 		ksu_handle_statfs_result(&f.file->f_path, statfs, ret);
 		fdput(f);
 	}
