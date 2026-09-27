@@ -2395,9 +2395,25 @@ static bool ksu_susfs_current_callchain_from_sus_map(void)
 }
 #endif
 
-static int ksu_susfs_fd_readlink(struct dentry *dentry, char __user *buf,
-				 int buflen)
+static bool ksu_susfs_dentry_is_proc_fd(struct dentry *dentry)
 {
+	struct dentry *parent;
+
+	if (!dentry) {
+		return false;
+	}
+
+	parent = READ_ONCE(dentry->d_parent);
+	return parent && parent != dentry && parent->d_name.len == 2 &&
+	       !memcmp(parent->d_name.name, "fd", 2);
+}
+
+static int ksu_susfs_fd_readlink(struct dentry *dentry, char __user *buf,
+				int buflen)
+{
+	struct task_struct *task;
+	int ret;
+
 	if (!ksu_susfs_orig_fd_readlink) {
 		return -ENOSYS;
 	}
@@ -2405,6 +2421,21 @@ static int ksu_susfs_fd_readlink(struct dentry *dentry, char __user *buf,
 	    ksu_susfs_proc_fd_dentry_hidden(dentry) &&
 	    !ksu_susfs_current_callchain_from_sus_map()) {
 		return ksu_susfs_copy_fake_link(buf, buflen);
+	}
+
+	/* Guard against a racing task teardown: the original
+	 * proc_pid_readlink() can dereference a half-reaped task (stale
+	 * fd table) and fault when the target exits concurrently. Bail
+	 * with -ESRCH when the owning task is already gone, and keep a
+	 * reference across the call so the task cannot be freed. */
+	if (ksu_susfs_dentry_is_proc_fd(dentry)) {
+		task = get_proc_task(d_inode(dentry));
+		if (!task) {
+			return -ESRCH;
+		}
+		ret = ksu_susfs_orig_fd_readlink(dentry, buf, buflen);
+		put_task_struct(task);
+		return ret;
 	}
 
 	return ksu_susfs_orig_fd_readlink(dentry, buf, buflen);
@@ -2487,6 +2518,9 @@ static bool ksu_susfs_map_files_dentry_hidden(struct dentry *dentry)
 static int ksu_susfs_map_files_readlink(struct dentry *dentry,
 					char __user *buf, int buflen)
 {
+	struct task_struct *task;
+	int ret;
+
 	if (!ksu_susfs_orig_map_files_readlink) {
 		return -ENOSYS;
 	}
@@ -2496,7 +2530,15 @@ static int ksu_susfs_map_files_readlink(struct dentry *dentry,
 		return ksu_susfs_copy_fake_link(buf, buflen);
 	}
 
-	return ksu_susfs_orig_map_files_readlink(dentry, buf, buflen);
+	/* Same teardown race as the fd hook: bail if the owning task is
+	 * already gone, and pin a reference across the original call. */
+	task = get_proc_task(d_inode(dentry));
+	if (!task) {
+		return -ESRCH;
+	}
+	ret = ksu_susfs_orig_map_files_readlink(dentry, buf, buflen);
+	put_task_struct(task);
+	return ret;
 }
 
 static int ksu_susfs_map_files_d_revalidate(struct dentry *dentry,
