@@ -1475,6 +1475,36 @@ static int ksu_susfs_show_map(struct seq_file *m, void *v)
 		return 0;
 	}
 
+	/*
+	 * A VMA that is neither hidden nor spoofed needs no rewriting at all, and
+	 * the kernel's own show path is then the byte-exact answer. Delegating
+	 * there keeps the output identical to an unpatched kernel for the
+	 * overwhelming majority of entries instead of routing every one of them
+	 * through this reimplementation, which cannot reproduce the kernel's
+	 * show_map_pad_vma() and so silently dropped pad regions (and could drop
+	 * a VMA entirely, e.g. a VM_PFNMAP [vdso] that has no vm_file to match a
+	 * hide rule against). It also means an app uid and root read the same
+	 * list when nothing is actually being concealed from that uid.
+	 */
+	if (!ksu_susfs_sus_map_match_vma(vma)) {
+		dev_t d = 0;
+		unsigned long i = 0;
+
+		if (!ksu_susfs_kstat_vma_spoof(vma, &d, &i)) {
+			int ret;
+
+			if (ksu_susfs_orig_maps_show) {
+				ret = ksu_susfs_orig_maps_show(m, v);
+			} else {
+				ret = -ENOSYS;
+			}
+			/* m_start() locates the next VMA from m->version. */
+			ksu_susfs_m_cache_vma(m, orig_vma);
+			ksu_susfs_put_data_vma(orig_vma, vma);
+			return ret;
+		}
+	}
+
 	pad_vma = ksu_susfs_get_pad_vma(orig_vma);
 	if (vma_pages(vma)) {
 		ksu_susfs_show_map_vma(m, vma);
