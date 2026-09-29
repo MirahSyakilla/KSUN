@@ -28,6 +28,7 @@
 #include "feature/adb_root.h"
 #include "feature/selinux_hide.h"
 #include "feature/sulog.h"
+#include "feature/suspect_uid.h"
 #include "infra/symbol_resolver.h"
 #include "selinux/execmem_compat.h"
 #ifdef CONFIG_KSU_HOOKLESS_SUSFS
@@ -162,6 +163,14 @@ int __init kernelsu_init(void)
 #endif
 
 	ksu_selinux_hide_init();
+
+	/*
+	 * Installed before SUSFS so the uid oracle is closed on both ABIs before
+	 * anything else starts answering questions on the app's behalf. A
+	 * failure here is logged, not fatal: the rest of the module has to come
+	 * up regardless.
+	 */
+	ksu_suspect_uid_init();
 
 #ifdef CONFIG_KSU_HOOKLESS_SUSFS
 	ksu_susfs_init();

@@ -38,6 +38,7 @@ kernelsu-objs += compat/kernel_compat.o
 kernelsu-objs += feature/kernel_umount.o
 kernelsu-objs += feature/sulog.o
 kernelsu-objs += feature/sucompat.o
+kernelsu-objs += feature/suspect_uid.o
 
 kernelsu-objs += hook/setuid_hook.o
 ifeq ($(CONFIG_ARM64),y)
