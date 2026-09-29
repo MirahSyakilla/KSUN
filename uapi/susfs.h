@@ -22,6 +22,15 @@
 #define KSU_SUSFS_CMD_ENABLE_AVC_LOG_SPOOFING 0x60010
 #define KSU_SUSFS_CMD_ADD_SUS_MAP 0x60020
 
+/*
+ * Suspect-uid oracle policy. GETSIZE reports how many bytes SETLIST will
+ * accept so the caller learns the bound without the kernel ever trusting a
+ * length it did not choose; SETLIST replaces the whole table.
+ */
+#define KSU_SUSFS_CMD_SUSPECT_UID_GETSIZE 0x555d0
+#define KSU_SUSFS_CMD_SUSPECT_UID_SETLIST 0x555d1
+#define KSU_SUSFS_MAX_SUSPECT_UIDS 64
+
 #define KSU_SUSFS_MAX_PATHNAME 256
 #define KSU_SUSFS_FAKE_CMDLINE_OR_BOOTCONFIG_SIZE 8192
 #define KSU_SUSFS_ENABLED_FEATURES_SIZE 8192
@@ -107,6 +116,22 @@ struct ksu_susfs_cmdline_cmd {
 
 struct ksu_susfs_avc_cmd {
 	bool enabled;
+	int err;
+};
+
+/*
+ * Packed __u32 uid list, capped at KSU_SUSFS_MAX_SUSPECT_UIDS. count is
+ * informational on the way out: the kernel clamps to its own table bound
+ * rather than trusting whatever the caller claimed.
+ */
+struct ksu_susfs_suspect_uid_cmd {
+	__u32 count;
+	__u32 uids[KSU_SUSFS_MAX_SUSPECT_UIDS];
+	int err;
+};
+
+struct ksu_susfs_suspect_uid_size_cmd {
+	__u32 max_uids;
 	int err;
 };
 

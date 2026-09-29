@@ -37,6 +37,8 @@
 #include <asm/ptrace.h>
 #include <asm/syscall.h>
 
+#include <uapi/susfs.h>
+
 #include "hook/syscall_hook.h"
 
 /* Mirrors user.c: UIDHASH_BITS is (CONFIG_BASE_SMALL ? 3 : 7). */
@@ -267,6 +269,63 @@ int ksu_suspect_uid_unhide(kuid_t target)
 	return ret;
 }
 
+/*
+ * Replace the whole table with @uids.
+ *
+ * The table is emptied first and then rebuilt, so a policy that does not fit
+ * is never left half applied - a partially applied table would hide some uids
+ * and not others according to a policy the caller believes is in force, which
+ * is the state that leaks. On overflow the excess is dropped and -ENOSPC is
+ * reported, but the accepted prefix is still in force: a caller that hides
+ * 200 packages should get the first 64 rather than none.
+ */
+int ksu_suspect_uid_set_list(const __u32 *uids, __u32 count)
+{
+	unsigned long flags;
+	__u32 applied = 0;
+	unsigned int i;
+
+	if (!uids && count) {
+		return -EINVAL;
+	}
+	if (count > KSU_SUSPECT_UID_MAX) {
+		count = KSU_SUSPECT_UID_MAX;
+	}
+
+	spin_lock_irqsave(&ksu_suspect_uid_lock, flags);
+	for (i = 0; i < KSU_SUSPECT_UID_MAX; i++) {
+		ksu_suspect_uid_rules[i].used = false;
+		ksu_suspect_uid_rules[i].target = KSU_SUSPECT_NULL;
+		ksu_suspect_uid_rules[i].standin = KSU_SUSPECT_NULL;
+	}
+	ksu_suspect_uid_count = 0;
+
+	for (i = 0; i < count; i++) {
+		uid_t v = uids[i];
+
+		if (!v || v == 0) {
+			continue;
+		}
+		if (ksu_suspect_uid_rules[applied].used) {
+			continue;
+		}
+		ksu_suspect_uid_rules[applied].target = KUIDT_INIT(v);
+		ksu_suspect_uid_rules[applied].standin =
+			ksu_suspect_uid_standin_for(KUIDT_INIT(v));
+		ksu_suspect_uid_rules[applied].used = true;
+		applied++;
+	}
+	ksu_suspect_uid_count = applied;
+	spin_unlock_irqrestore(&ksu_suspect_uid_lock, flags);
+
+	return applied;
+}
+
+__u32 ksu_suspect_uid_max(void)
+{
+	return KSU_SUSPECT_UID_MAX;
+}
+
 int ksu_suspect_uid_init(void)
 {
 	int ret;
@@ -312,4 +371,63 @@ void ksu_suspect_uid_exit(void)
 {
 	ksu_unregister_syscall_hook(__NR_getpriority);
 	ksu_unregister_syscall_hook(__NR_setpriority);
+}
+
+/*
+ * susfs-style config channel, reached over the supercall the same way every
+ * other susfs command is. A module's userspace helper pushes the uid list here;
+ * the kernel never reads a policy from disk, so the official manager needs no
+ * support for it and a stale file cannot be acted on.
+ *
+ * The supercall layer has already established that the caller is root or a KSU
+ * domain (ksu_susfs_supercall_allowed) before any handler is reached, so this
+ * does not repeat that check - the other compat handlers do it only because
+ * some of them are also reachable from the pre-auth path.
+ */
+bool ksu_suspect_uid_handle_compat(unsigned int cmd, void __user *arg)
+{
+	struct ksu_susfs_suspect_uid_size_cmd size_cmd;
+	struct ksu_susfs_suspect_uid_cmd list_cmd;
+	int err = 0;
+
+	if (cmd == KSU_SUSFS_CMD_SUSPECT_UID_GETSIZE) {
+		memset(&size_cmd, 0, sizeof(size_cmd));
+		if (copy_from_user(&size_cmd, arg, sizeof(size_cmd))) {
+			return true;
+		}
+		size_cmd.max_uids = ksu_suspect_uid_max();
+		if (copy_to_user(arg, &size_cmd, sizeof(size_cmd))) {
+			pr_err("suspect_uid: getsize copy_to_user failed\n");
+		}
+		return true;
+	}
+
+	if (cmd == KSU_SUSFS_CMD_SUSPECT_UID_SETLIST) {
+		memset(&list_cmd, 0, sizeof(list_cmd));
+		if (copy_from_user(&list_cmd, arg, sizeof(list_cmd))) {
+			return true;
+		}
+		/*
+		 * The count the caller sent is only a hint. The table's own bound
+		 * is what limits the write, and the fixed-size struct means the
+		 * copy_from_user above could not have overflowed either way.
+		 */
+		if (list_cmd.count > KSU_SUSFS_MAX_SUSPECT_UIDS) {
+			list_cmd.count = KSU_SUSFS_MAX_SUSPECT_UIDS;
+		}
+		err = ksu_suspect_uid_set_list(list_cmd.uids, list_cmd.count);
+		if (err < 0) {
+			list_cmd.err = err;
+		} else {
+			list_cmd.count = err;
+			pr_info("suspect_uid: policy set, %d uid(s) hidden\n",
+				err);
+		}
+		if (copy_to_user(arg, &list_cmd, sizeof(list_cmd))) {
+			pr_err("suspect_uid: setlist copy_to_user failed\n");
+		}
+		return true;
+	}
+
+	return false;
 }

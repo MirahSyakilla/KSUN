@@ -7,8 +7,8 @@
 #define KSU_FEATURE_SUSPECT_UID_H
 
 #include <linux/types.h>
+#include <linux/uaccess.h>
 #include <linux/uidgid.h>
-
 #define KSU_SUSPECT_NULL ((kuid_t){ .val = 0 })
 
 /* Start answering for @target as an unregistered uid. */
@@ -16,6 +16,19 @@ int ksu_suspect_uid_hide(kuid_t target);
 
 /* Stop hiding @target. */
 int ksu_suspect_uid_unhide(kuid_t target);
+
+/* Replace the whole policy with @uids. Returns how many were accepted. */
+int ksu_suspect_uid_set_list(const __u32 *uids, __u32 count);
+
+/* How many uids the table holds. */
+__u32 ksu_suspect_uid_max(void);
+
+/*
+ * susfs-style config channel. Returns false when @cmd is not one of ours so
+ * the caller can keep looking; true means the command was consumed, whether
+ * or not it succeeded (the result travels back in the struct's err field).
+ */
+bool ksu_suspect_uid_handle_compat(unsigned int cmd, void __user *arg);
 
 /* Install the getpriority/setpriority hooks. */
 int ksu_suspect_uid_init(void);

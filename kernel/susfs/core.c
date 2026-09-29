@@ -26,6 +26,7 @@
 #include "compat/kernel_compat.h"
 #include "klog.h" // IWYU pragma: keep
 #include "ksu.h"
+#include "feature/suspect_uid.h"
 #include "policy/allowlist.h"
 #include "selinux/selinux.h"
 #include "susfs/compat.h"
@@ -1769,7 +1770,12 @@ bool ksu_susfs_handle_compat(unsigned int cmd, void __user *arg)
 	case KSU_SUSFS_CMD_ENABLE_AVC_LOG_SPOOFING:
 		return ksu_susfs_handle_avc_compat(arg);
 	default:
-		return false;
+		/*
+		 * Not a susfs rule: the suspect-uid oracle is its own policy and
+		 * is served by the feature that owns it, so that feature does not
+		 * have to be pulled into the sepolicy tree.
+		 */
+		return ksu_suspect_uid_handle_compat(cmd, arg);
 	}
 }
 
