@@ -37,7 +37,8 @@
 #include <asm/ptrace.h>
 #include <asm/syscall.h>
 
-#include <uapi/susfs.h>
+/* Same quote-form path kernel/susfs/susfs.h uses to reach the command ids. */
+#include "uapi/susfs.h"
 
 #include "hook/syscall_hook.h"
 
@@ -69,10 +70,18 @@
 #define KSU_ARG_WHO 1
 
 struct ksu_suspect_uid_rule {
+	kuid_t caller;
 	kuid_t target;
 	kuid_t standin;
 	bool used;
 };
+
+/*
+ * A caller value that matches every caller, so the original whole-table
+ * command keeps its meaning: a uid listed there is hidden from every
+ * unprivileged caller rather than from one caller in particular.
+ */
+#define KSU_SUSPECT_CALLER_ANY 0xffffffffu
 
 /*
  * Small fixed-size table, deliberately not a hash map: the lookup below is
@@ -81,47 +90,81 @@ struct ksu_suspect_uid_rule {
  * on the target would leak the answer through its probe count and its cache
  * behaviour, which is the same class of leak this file exists to remove.
  */
-#define KSU_SUSPECT_UID_MAX 64
+#define KSU_SUSPECT_UID_MAX 128
+
 static struct ksu_suspect_uid_rule ksu_suspect_uid_rules[KSU_SUSPECT_UID_MAX];
 static unsigned int ksu_suspect_uid_count;
+
+/*
+ * Per-caller masks, consulted after the flat table. Kept separate rather than
+ * merged so the flat command keeps its exact previous behaviour and semantics.
+ *
+ * A bit per app uid rather than a list of uids: HMA hides per caller and the
+ * hidden sets overlap heavily, so storing (caller, uid) pairs would repeat the
+ * same shared bulk once per caller - roughly fifteen thousand entries for the
+ * configured callers, which neither fits a sensible table nor can be scanned
+ * per getpriority() call under a spinlock without becoming a contention
+ * vector. One bit per caller costs 1250 bytes and answers in constant time, so
+ * the whole table is a fixed 80KB and the cost of a lookup does not grow with
+ * the policy.
+ *
+ * Only the app uid range is representable, which is exactly the range brene
+ * is allowed to hide: a system or shared uid is never put in a mask (see
+ * ksu_suspect_uid_set_mask), and answering ESRCH for one would hide every
+ * other package that shares it.
+ */
+/*
+ * AID_APP_START. Spelled out rather than pulled from
+ * include/linux/androiduid.h, which this kernel does not carry, so the bound
+ * is stated where it is used rather than assumed. It is the first uid the
+ * platform allocates to an app; below it every uid is a system or shared uid.
+ */
+#define KSU_SUSPECT_APP_UID_START 10000
+#define KSU_SUSPECT_MASK_BITS 10000
+#define KSU_SUSPECT_MASK_BYTES (KSU_SUSPECT_MASK_BITS / 8)
+#define KSU_SUSPECT_CALLER_MAX 64
+
+struct ksu_suspect_caller_mask {
+	kuid_t caller;
+	bool used;
+	u8 bits[KSU_SUSPECT_MASK_BYTES];
+};
+
+static struct ksu_suspect_caller_mask
+	ksu_suspect_caller_masks[KSU_SUSPECT_CALLER_MAX];
 static DEFINE_SPINLOCK(ksu_suspect_uid_lock);
 
 static kuid_t ksu_suspect_uid_standin_for(kuid_t target)
 {
-	unsigned int want = (((__kuid_val(target) >> KSU_UIDHASH_BITS) +
-			     __kuid_val(target)) & KSU_UIDHASH_MASK);
-	unsigned int v = KSU_UID_STANDIN_BASE;
-	unsigned int n;
-
 	/*
-	 * Walk stand-ins until one lands in the target's bucket. The stride is
-	 * odd, so it is coprime with the power-of-two mask and the walk reaches
-	 * a matching bucket rather than cycling through a subset of them.
+	 * One stand-in for every hidden uid, not one per target.
+	 *
+	 * The stand-in only has to be a uid that is not registered, because all
+	 * the caller ever observes is -ESRCH either way - it cannot see which uid
+	 * was substituted. Using a single value also keeps the substitution
+	 * constant-cost: picking a stand-in per target would mean scanning for a
+	 * matching uidhash bucket, and that scan would only run when the queried
+	 * uid was hidden, which is a timing side channel in itself. The caller
+	 * could then time its way to the answer.
 	 */
-	for (n = 0; n < KSU_UIDHASH_SZ; n++) {
-		if (((v >> KSU_UIDHASH_BITS) + v & KSU_UIDHASH_MASK) == want) {
-			return KUIDT_INIT(v);
-		}
-		v += 2 * (n + 1) + 1;
-	}
-
-	/*
-	 * Unreachable: a bucket always exists in a table of this size. Returning
-	 * the base still yields a uid that does not exist, so a hidden uid is
-	 * still answered as absent, only without the equal-cost guarantee.
-	 */
+	(void)target;
 	return KUIDT_INIT(KSU_UID_STANDIN_BASE);
 }
 
 /*
- * Constant-work policy check.
+ * Decide whether @who should answer as unregistered for @caller, and return
+ * the uid the syscall should be given instead.
  *
- * The whole table is scanned on every query, whether or not the caller is
- * hidden, and the result is combined with bitwise OR so no early return can
- * make a hidden uid finish sooner than a visible one. The caller is only ever
- * told the substituted value it should use: its own uid when it is not hidden,
- * the stand-in when it is. Returning the uid rather than a boolean keeps the
- * substitution decision and the lookup in one pass.
+ * Returning the uid rather than a boolean keeps the decision and the lookup in
+ * one pass, and means the caller is only ever told the value to substitute:
+ * its own uid when @who is not hidden, the stand-in when it is.
+ *
+ * Both tables are scanned in full and unconditionally, and the results are
+ * combined with a bitwise OR rather than an early return, so the cost of a
+ * query cannot depend on the answer. A hash map keyed on the target would leak
+ * it through its probe count, which is the same class of leak this file exists
+ * to remove; the per-caller mask is a flat array, so the same property holds
+ * while staying O(1) in the size of the policy.
  */
 static kuid_t ksu_suspect_uid_query(kuid_t caller, kuid_t who)
 {
@@ -141,22 +184,47 @@ static kuid_t ksu_suspect_uid_query(kuid_t caller, kuid_t who)
 	}
 
 	spin_lock_irqsave(&ksu_suspect_uid_lock, flags);
+
 	for (i = 0; i < KSU_SUSPECT_UID_MAX; i++) {
 		bool hit;
 
-		/*
-		 * Every slot is read and compared on every query, so the loop
-		 * costs the same whether or not this caller is hidden. The result
-		 * is only written when the entry matches, which cannot make a
-		 * hidden uid finish sooner than a visible one - the scan itself
-		 * is what dominates, and it is unconditional.
-		 */
 		hit = READ_ONCE(ksu_suspect_uid_rules[i].used) &&
 		      uid_eq(READ_ONCE(ksu_suspect_uid_rules[i].target), who);
 		if (hit) {
 			replacement = READ_ONCE(ksu_suspect_uid_rules[i].standin);
 		}
 	}
+
+	{
+		unsigned int val = (unsigned int)__kuid_val(who);
+		unsigned int idx = val - KSU_SUSPECT_APP_UID_START;
+		bool hidden = false;
+
+		/*
+		 * Every caller slot is examined whether or not it belongs to this
+		 * caller and whether or not it is in use, so neither the caller's
+		 * presence nor the queried uid changes the loop's shape. A mask
+		 * hides the uid only for its own caller: HMA hides per caller,
+		 * and a uid one caller can see has to stay visible to it or the
+		 * kernel contradicts what the framework showed that caller.
+		 */
+		for (i = 0; i < KSU_SUSPECT_CALLER_MAX; i++) {
+			bool mine =
+				READ_ONCE(ksu_suspect_caller_masks[i].used) &&
+				uid_eq(READ_ONCE(
+						ksu_suspect_caller_masks[i].caller),
+				       caller);
+
+			if (mine && idx < KSU_SUSPECT_MASK_BITS) {
+				hidden = (READ_ONCE(ksu_suspect_caller_masks[i]
+							    .bits[idx >> 3]) &
+					  (1u << (idx & 7))) != 0;
+			}
+		}
+		if (hidden)
+			replacement = ksu_suspect_uid_standin_for(who);
+	}
+
 	spin_unlock_irqrestore(&ksu_suspect_uid_lock, flags);
 
 	return replacement;
@@ -232,6 +300,8 @@ int ksu_suspect_uid_hide(kuid_t target)
 		if (ksu_suspect_uid_rules[i].used) {
 			continue;
 		}
+		ksu_suspect_uid_rules[i].caller = KUIDT_INIT(
+			KSU_SUSPECT_CALLER_ANY);
 		ksu_suspect_uid_rules[i].target = target;
 		ksu_suspect_uid_rules[i].standin =
 			ksu_suspect_uid_standin_for(target);
@@ -258,6 +328,7 @@ int ksu_suspect_uid_unhide(kuid_t target)
 			continue;
 		}
 		WRITE_ONCE(ksu_suspect_uid_rules[i].used, false);
+		ksu_suspect_uid_rules[i].caller = KSU_SUSPECT_NULL;
 		ksu_suspect_uid_rules[i].target = KSU_SUSPECT_NULL;
 		ksu_suspect_uid_rules[i].standin = KSU_SUSPECT_NULL;
 		ksu_suspect_uid_count--;
@@ -277,7 +348,7 @@ int ksu_suspect_uid_unhide(kuid_t target)
  * and not others according to a policy the caller believes is in force, which
  * is the state that leaks. On overflow the excess is dropped and -ENOSPC is
  * reported, but the accepted prefix is still in force: a caller that hides
- * 200 packages should get the first 64 rather than none.
+ * 200 packages should get the first KSU_SUSPECT_UID_MAX rather than none.
  */
 int ksu_suspect_uid_set_list(const __u32 *uids, __u32 count)
 {
@@ -295,6 +366,7 @@ int ksu_suspect_uid_set_list(const __u32 *uids, __u32 count)
 	spin_lock_irqsave(&ksu_suspect_uid_lock, flags);
 	for (i = 0; i < KSU_SUSPECT_UID_MAX; i++) {
 		ksu_suspect_uid_rules[i].used = false;
+		ksu_suspect_uid_rules[i].caller = KSU_SUSPECT_NULL;
 		ksu_suspect_uid_rules[i].target = KSU_SUSPECT_NULL;
 		ksu_suspect_uid_rules[i].standin = KSU_SUSPECT_NULL;
 	}
@@ -309,6 +381,8 @@ int ksu_suspect_uid_set_list(const __u32 *uids, __u32 count)
 		if (ksu_suspect_uid_rules[applied].used) {
 			continue;
 		}
+		ksu_suspect_uid_rules[applied].caller = KUIDT_INIT(
+			KSU_SUSPECT_CALLER_ANY);
 		ksu_suspect_uid_rules[applied].target = KUIDT_INIT(v);
 		ksu_suspect_uid_rules[applied].standin =
 			ksu_suspect_uid_standin_for(KUIDT_INIT(v));
@@ -319,6 +393,47 @@ int ksu_suspect_uid_set_list(const __u32 *uids, __u32 count)
 	spin_unlock_irqrestore(&ksu_suspect_uid_lock, flags);
 
 	return applied;
+}
+
+/*
+ * Install the caller-scoped mask for @caller, replacing whatever that caller
+ * had before.
+ *
+ * One command per caller is what makes an incremental update possible: a caller
+ * whose hidden set has not changed does not need to be sent at all, and this
+ * never touches the other callers' masks.
+ *
+ * Uids outside the app range are refused rather than clamped. A system or
+ * shared uid - 1000 is shared by two dozen packages including android itself -
+ * must never get ESRCH, because that would hide every other package sharing it.
+ * The caller's own uid is allowed to be in its mask: an app that hides itself
+ * from its own view is exactly one of the cases worth covering.
+ */
+int ksu_suspect_uid_set_mask(kuid_t caller, const u8 *bits)
+{
+	unsigned long flags;
+	unsigned int i;
+	int ret = -ENOSPC;
+
+	if (!bits || !caller.val || uid_eq(caller, GLOBAL_ROOT_UID))
+		return -EINVAL;
+
+	spin_lock_irqsave(&ksu_suspect_uid_lock, flags);
+	for (i = 0; i < KSU_SUSPECT_CALLER_MAX; i++) {
+		if (ksu_suspect_caller_masks[i].used &&
+		    !uid_eq(ksu_suspect_caller_masks[i].caller, caller))
+			continue;
+
+		memcpy(ksu_suspect_caller_masks[i].bits, bits,
+		       KSU_SUSPECT_MASK_BYTES);
+		WRITE_ONCE(ksu_suspect_caller_masks[i].caller, caller);
+		WRITE_ONCE(ksu_suspect_caller_masks[i].used, true);
+		ret = 0;
+		break;
+	}
+	spin_unlock_irqrestore(&ksu_suspect_uid_lock, flags);
+
+	return ret;
 }
 
 __u32 ksu_suspect_uid_max(void)
@@ -353,14 +468,15 @@ int ksu_suspect_uid_init(void)
 	}
 
 	/*
-	 * ksu_register_syscall_hook() mirrors a native entry into
-	 * compat_sys_call_table when the compat slot still holds the same
-	 * handler, and only then - it resolves the slot by identity rather than
-	 * by number, because the AArch32 numbers for these two calls (96 and 97)
-	 * are not the 64-bit ones (141 and 140) __NR_getpriority/__NR_setpriority
-	 * name here. Passing the 64-bit constants and letting the mirror decide
-	 * is what keeps a 32-bit detector from walking the same oracle through
-	 * the other ABI.
+	 * ksu_register_syscall_hook() also mirrors a hooked native entry into
+	 * compat_sys_call_table, so a 32-bit detector cannot walk the same
+	 * oracle through the other ABI. That mirror needs a compat slot to
+	 * point at: reboot is recorded at init because its two tables share
+	 * one handler, and getpriority/setpriority are recorded on first use
+	 * because they are "common" calls whose AArch32 and 64-bit slots also
+	 * share a handler. The mirror is best-effort - if a slot cannot be
+	 * identified the syscall stays native-only, and the boot log says so
+	 * rather than the coverage being assumed.
 	 */
 	pr_info("suspect_uid: uid oracle hiding ready (%d syscall(s), both ABIs)\n",
 		reg);
@@ -369,6 +485,15 @@ int ksu_suspect_uid_init(void)
 
 void ksu_suspect_uid_exit(void)
 {
+	{
+		unsigned long flags;
+		unsigned int i;
+
+		spin_lock_irqsave(&ksu_suspect_uid_lock, flags);
+		for (i = 0; i < KSU_SUSPECT_CALLER_MAX; i++)
+			ksu_suspect_caller_masks[i].used = false;
+		spin_unlock_irqrestore(&ksu_suspect_uid_lock, flags);
+	}
 	ksu_unregister_syscall_hook(__NR_getpriority);
 	ksu_unregister_syscall_hook(__NR_setpriority);
 }
@@ -388,13 +513,19 @@ bool ksu_suspect_uid_handle_compat(unsigned int cmd, void __user *arg)
 {
 	struct ksu_susfs_suspect_uid_size_cmd size_cmd;
 	struct ksu_susfs_suspect_uid_cmd list_cmd;
+	struct ksu_susfs_suspect_uid_mask_cmd mask_cmd;
 	int err = 0;
 
+	pr_info("suspect_uid: compat cmd=0x%x\n", cmd);
+
 	if (cmd == KSU_SUSFS_CMD_SUSPECT_UID_GETSIZE) {
+		/*
+		 * This command carries no input, so the reply is built from
+		 * scratch and only written back. Reading the caller's struct in
+		 * first would import its sentinel ERR_CMD_NOT_SUPPORTED into
+		 * the reply and report a supported command as missing.
+		 */
 		memset(&size_cmd, 0, sizeof(size_cmd));
-		if (copy_from_user(&size_cmd, arg, sizeof(size_cmd))) {
-			return true;
-		}
 		size_cmd.max_uids = ksu_suspect_uid_max();
 		if (copy_to_user(arg, &size_cmd, sizeof(size_cmd))) {
 			pr_err("suspect_uid: getsize copy_to_user failed\n");
@@ -415,6 +546,12 @@ bool ksu_suspect_uid_handle_compat(unsigned int cmd, void __user *arg)
 		if (list_cmd.count > KSU_SUSFS_MAX_SUSPECT_UIDS) {
 			list_cmd.count = KSU_SUSFS_MAX_SUSPECT_UIDS;
 		}
+		/*
+		 * The copy above brought the caller's sentinel err in with it, so
+		 * clear it first: this reply only ever carries a non-zero err to
+		 * report a failure.
+		 */
+		list_cmd.err = 0;
 		err = ksu_suspect_uid_set_list(list_cmd.uids, list_cmd.count);
 		if (err < 0) {
 			list_cmd.err = err;
@@ -426,6 +563,26 @@ bool ksu_suspect_uid_handle_compat(unsigned int cmd, void __user *arg)
 		if (copy_to_user(arg, &list_cmd, sizeof(list_cmd))) {
 			pr_err("suspect_uid: setlist copy_to_user failed\n");
 		}
+		return true;
+	}
+
+	if (cmd == KSU_SUSFS_CMD_SUSPECT_UID_SETMASK) {
+		struct ksu_susfs_suspect_uid_mask_cmd mask_cmd;
+
+		/* No input to preserve, so nothing is read back from the caller. */
+		memset(&mask_cmd, 0, sizeof(mask_cmd));
+		if (copy_from_user(&mask_cmd, arg, sizeof(mask_cmd))) {
+			pr_err("suspect_uid: setmask copy_from_user failed\n");
+			return true;
+		}
+		err = ksu_suspect_uid_set_mask(KUIDT_INIT(mask_cmd.caller),
+					      mask_cmd.bits);
+		mask_cmd.err = err < 0 ? err : 0;
+		if (copy_to_user(arg, &mask_cmd, sizeof(mask_cmd))) {
+			pr_err("suspect_uid: setmask copy_to_user failed\n");
+		}
+		pr_info("suspect_uid: mask for caller %u: %d\n",
+			mask_cmd.caller, (int)err);
 		return true;
 	}
 
