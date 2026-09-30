@@ -260,6 +260,42 @@ static long __nocfi ksu_direct_syscall_dispatcher(KSU_SYSCALL_WRAPPER_ARGS)
 
 // Register a handler into the dispatcher's routing table.
 // Does not modify the syscall table — the dispatcher slot is shared by all hooks.
+/*
+ * Find the AArch32 slot a 32-bit caller of native syscall @nr lands on.
+ *
+ * The map built at init only carries the calls whose two tables point at
+ * different handlers, so a "common" call listed in arch/arm/tools/syscall.tbl
+ * without an oabi column - getpriority and setpriority among them - is reached
+ * through one shared handler from both tables and never gets a map entry.
+ * Those are found by identity rather than by a hardcoded AArch32 number: the
+ * compat entry pointing at the same handler is the one a 32-bit caller
+ * reaches.  This is the same table-and-kallsyms basis the rest of this file
+ * uses; nothing here installs a probe or a call-site patch.
+ *
+ * A shared handler is only accepted when it is unambiguous.  If the compat
+ * table offers no such slot, or more than one, nothing is found and the
+ * syscall stays native-only rather than have a slot guessed at.
+ */
+static int ksu_compat_find_shared_slot(int nr)
+{
+    syscall_fn_t want = ksu_get_syscall_invoke_target(nr);
+    int found = -1;
+    int i;
+
+    if (!ksu_compat_syscall_table || !want)
+        return -1;
+
+    for (i = 0; i < __NR_syscalls; i++) {
+        if (READ_ONCE(ksu_compat_syscall_table[i]) != want)
+            continue;
+        if (found >= 0)
+            return -1;
+        found = i;
+    }
+
+    return found;
+}
+
 int ksu_register_syscall_hook(int nr, ksu_syscall_hook_fn fn)
 {
     int ret = 0;
@@ -294,6 +330,17 @@ int ksu_register_syscall_hook(int nr, ksu_syscall_hook_fn fn)
                 compat_nr = i;
                 break;
             }
+        }
+
+        if (compat_nr < 0) {
+            /*
+             * No init-time entry for this syscall: discover the compat slot
+             * by the shared handler and record it, so hooking a second
+             * syscall that resolves to the same slot does not search again.
+             */
+            compat_nr = ksu_compat_find_shared_slot(nr);
+            if (compat_nr >= 0)
+                WRITE_ONCE(ksu_compat_nr_map[compat_nr], nr);
         }
 
         if (compat_nr >= 0) {

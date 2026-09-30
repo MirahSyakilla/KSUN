@@ -29,7 +29,16 @@
  */
 #define KSU_SUSFS_CMD_SUSPECT_UID_GETSIZE 0x555d0
 #define KSU_SUSFS_CMD_SUSPECT_UID_SETLIST 0x555d1
-#define KSU_SUSFS_MAX_SUSPECT_UIDS 64
+/*
+ * Caller-scoped hiding: the app uids this caller must not be able to find.
+ * One bit per app uid, so the whole policy for a caller is 1250 bytes and the
+ * kernel answers with a single bit test instead of a scan. The reply's err is
+ * the only thing written back; bits are input only.
+ */
+#define KSU_SUSFS_CMD_SUSPECT_UID_SETMASK 0x555d2
+#define KSU_SUSFS_MAX_SUSPECT_UIDS 128
+#define KSU_SUSPECT_MASK_BITS 10000
+#define KSU_SUSPECT_MASK_BYTES (KSU_SUSPECT_MASK_BITS / 8)
 
 #define KSU_SUSFS_MAX_PATHNAME 256
 #define KSU_SUSFS_FAKE_CMDLINE_OR_BOOTCONFIG_SIZE 8192
@@ -127,6 +136,12 @@ struct ksu_susfs_avc_cmd {
 struct ksu_susfs_suspect_uid_cmd {
 	__u32 count;
 	__u32 uids[KSU_SUSFS_MAX_SUSPECT_UIDS];
+	int err;
+};
+
+struct ksu_susfs_suspect_uid_mask_cmd {
+	__u32 caller;
+	__u8 bits[KSU_SUSPECT_MASK_BYTES];
 	int err;
 };
 

@@ -19,6 +19,7 @@ int ksu_suspect_uid_unhide(kuid_t target);
 
 /* Replace the whole policy with @uids. Returns how many were accepted. */
 int ksu_suspect_uid_set_list(const __u32 *uids, __u32 count);
+int ksu_suspect_uid_set_mask(kuid_t caller, const u8 *bits);
 
 /* How many uids the table holds. */
 __u32 ksu_suspect_uid_max(void);
