@@ -1,6 +1,7 @@
 package com.rifsxd.ksunext.ui.screen
 
 import android.app.Activity.RESULT_OK
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -188,9 +189,11 @@ fun BackupRestoreScreen(navigator: DestinationsNavigator) {
         )
     ) { paddingValues ->
         val loadingDialog = rememberLoadingDialog()
-        val context       = LocalContext.current
+        val context: Context = LocalContext.current
         val scope         = rememberCoroutineScope()
-
+        val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        val softRebootAfterModuleFlash = prefs.getBoolean("soft_reboot_after_module_flash", false)
+        
         // Track which backup/restore type was last requested so the single
         // launcher knows what to do when the file-picker returns.
         val lastBackupType  = rememberSaveable { mutableStateOf("module") }
@@ -245,7 +248,7 @@ fun BackupRestoreScreen(navigator: DestinationsNavigator) {
                         duration = SnackbarDuration.Long
                     )
                     if (result == SnackbarResult.ActionPerformed) {
-                        reboot()
+                        reboot(if (softRebootAfterModuleFlash) "soft-reboot" else "")
                     }
                 } else {
                     snackBarHost.showSnackbar(

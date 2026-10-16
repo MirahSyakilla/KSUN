@@ -538,6 +538,7 @@ private fun ModuleList(
     val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
 
     val developerOptionsEnabled = prefs.getBoolean("enable_developer_options", false)
+    val softRebootAfterModuleFlash = prefs.getBoolean("soft_reboot_after_module_flash", false)
 
     val loadingDialog = rememberLoadingDialog()
     val confirmDialog = rememberConfirmDialog()
@@ -643,7 +644,7 @@ private fun ModuleList(
             duration = SnackbarDuration.Long
         )
         if (result == SnackbarResult.ActionPerformed) {
-            reboot()
+            reboot(if (softRebootAfterModuleFlash) "soft-reboot" else "")
         }
     }
 
@@ -741,7 +742,7 @@ private fun ModuleList(
                                             duration = SnackbarDuration.Long
                                         )
                                         if (result == SnackbarResult.ActionPerformed) {
-                                            reboot()
+                                            reboot(if (softRebootAfterModuleFlash) "soft-reboot" else "")
                                         }
                                     } else {
                                         val message =
