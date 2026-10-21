@@ -34,6 +34,40 @@ struct SusfsEnabledFeatures {
     err: i32,
 }
 
+// Probe whether a SUSFS implementation is already answering the supercall.
+// Returns the version string it reported, or None when nothing answers.
+//
+// Used by the SUSFS guard LKM loader (susfs_lkm.rs): the in-tree hookless
+// SUSFS and the standalone module are alternatives, so the module must not be
+// loaded while one of them is already live.
+pub fn detected_version() -> Option<String> {
+    let mut cmd = SusfsVersion {
+        version: [0; SUSFS_MAX_VERSION_BUFSIZE],
+        err: ERR_CMD_NOT_SUPPORTED,
+    };
+
+    unsafe {
+        syscall(
+            SYS_reboot,
+            KSU_INSTALL_MAGIC1,
+            SUSFS_MAGIC,
+            CMD_SUSFS_SHOW_VERSION,
+            &raw mut cmd,
+        );
+    }
+
+    if cmd.err != 0 {
+        return None;
+    }
+
+    let length = cmd
+        .version
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(cmd.version.len());
+    (length != 0).then(|| String::from_utf8_lossy(&cmd.version[..length]).into_owned())
+}
+
 pub fn show_version() -> Result<()> {
     let mut cmd = SusfsVersion {
         version: [0; SUSFS_MAX_VERSION_BUFSIZE],

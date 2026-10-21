@@ -130,6 +130,12 @@ kernelsu-objs += feature/adb_root.o
 
 kernelsu-objs += feature/selinux_hide.o
 
+ifeq ($(CONFIG_KSU_SUSFS_LKM),y)
+ifeq ($(CONFIG_KSU_HOOKLESS_SUSFS),y)
+$(error CONFIG_KSU_HOOKLESS_SUSFS and CONFIG_KSU_SUSFS_LKM are mutually exclusive: the in-tree hookless SUSFS (kernel/susfs/) and the standalone SUSFS module (kernel/susfs_lkm/, susfs_guard_lkm.ko) implement the same feature on the same hooks, so only one of them may be live. Pick one in the Kconfig menu.)
+endif
+endif
+
 ifeq ($(CONFIG_KSU_HOOKLESS_SUSFS),y)
 kernelsu-objs += susfs/core.o
 kernelsu-objs += susfs/kstat.o

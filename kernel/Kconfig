@@ -106,9 +106,36 @@ config KSU_BL_GENERATED
 	  The generated object stores symbol names and enum IDs only; the
 	  runtime continues to resolve and verify every target at boot.
 
+config KSU_SUSFS_LKM
+	bool "KernelSU SUSFS loadable kernel module (susfs_guard_lkm)"
+	depends on KSU
+	depends on ARM64
+	depends on KPROBES
+	default n
+	help
+	  Select the standalone SUSFS module (susfs_guard_lkm.ko) as this
+	  kernel's SUSFS implementation instead of the in-tree hookless one.
+
+	  The module lives in kernel/susfs_lkm/ and is built OUT of tree by
+	  tools/build/build_susfs_lkm.sh, as susfs_guard_lkm.ko; it is loaded
+	  at runtime through `ksud susfs load` (which resolves the module's
+	  imports from /proc/kallsyms before init_module(), because the module
+	  imports kernel symbols the kernel does not export).
+
+	  This option and KSU_HOOKLESS_SUSFS are ALTERNATIVES: both implement
+	  SUSFS on the same hooks (the reboot supercall, the LSM slot patcher,
+	  the stat/statx probes), so only one of them may be live on a device.
+	  Kconfig refuses to let both be selected, and kernel/Kbuild fails the
+	  build if a hand-edited .config ends up with both.
+
+	  The module needs CONFIG_KPROBES: it arms its probes with
+	  register_kprobe()/register_kretprobe(), and refuses to load at all
+	  when those imports cannot be resolved.
+
 config KSU_HOOKLESS_SUSFS
 	bool "KernelSU hookless SUSFS"
 	depends on KSU && KSU != m && KSU_HOOK_CORE
+	depends on !KSU_SUSFS_LKM
 	default n
 	help
 	  Enable the hookless SUSFS runtime hosted entirely inside

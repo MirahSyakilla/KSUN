@@ -64,6 +64,10 @@ pub fn on_post_data_fs() -> Result<()> {
         return Ok(());
     }
 
+    if let Err(e) = crate::susfs_lkm::load_if_autoload_enabled() {
+        warn!("SUSFS guard LKM auto-load failed: {e:#}");
+    }
+
     if let Err(e) = handle_updated_modules() {
         warn!("handle updated modules failed: {e}");
     }

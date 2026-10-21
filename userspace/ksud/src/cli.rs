@@ -7,7 +7,7 @@ use log::{LevelFilter, info};
 
 use crate::boot_patch::{BootPatchArgs, BootRestoreArgs};
 use crate::module::regenerate_preinit_rc;
-use crate::{apk_sign, assets, debug, defs, ksu_uapi, init_event, ksucalls, module, module_config, sulog, susfsd, utils};
+use crate::{apk_sign, assets, debug, defs, ksu_uapi, init_event, ksucalls, module, module_config, sulog, susfs_lkm, susfsd, utils};
 
 /// KernelSU Next userspace cli
 #[derive(Parser, Debug)]
@@ -472,6 +472,19 @@ enum UmountOp {
 
 #[derive(clap::Subcommand, Debug)]
 enum SusfsAction {
+    /// Load the SUSFS guard LKM (susfs_guard_lkm.ko)
+    Load {
+        /// Specify kernel KMI version instead of auto-detection
+        #[arg(long)]
+        kmi: Option<String>,
+    },
+    /// Unload the SUSFS guard LKM
+    Unload,
+    /// Configure automatic SUSFS LKM loading during post-fs-data
+    Autoload {
+        #[command(subcommand)]
+        command: SusfsAutoloadAction,
+    },
     /// Show if susfs is supported
     Support,
     /// Show susfs version
@@ -480,6 +493,20 @@ enum SusfsAction {
     Variant,
     /// Show enabled features
     Features,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum SusfsAutoloadAction {
+    /// Enable auto-load and save a KMI fallback
+    Enable {
+        /// KMI to use if boot-time KMI detection fails
+        #[arg(long)]
+        kmi: Option<String>,
+    },
+    /// Disable automatic SUSFS LKM loading
+    Disable,
+    /// Show whether automatic loading is enabled
+    Status,
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -761,6 +788,25 @@ pub fn run() -> Result<()> {
         Commands::Insmod { module, params } => debug::insmod(&module, &params),
 
         Commands::Susfs { command } => match command {
+            SusfsAction::Load { kmi } => susfs_lkm::load(kmi.as_deref()),
+            SusfsAction::Unload => susfs_lkm::unload(),
+            SusfsAction::Autoload { command } => match command {
+                SusfsAutoloadAction::Enable { kmi } => {
+                    susfs_lkm::set_autoload(true, kmi.as_deref())
+                }
+                SusfsAutoloadAction::Disable => susfs_lkm::set_autoload(false, None),
+                SusfsAutoloadAction::Status => {
+                    println!(
+                        "{}",
+                        if susfs_lkm::autoload_enabled()? {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        }
+                    );
+                    Ok(())
+                }
+            },
             SusfsAction::Support => susfsd::show_features(true),
             SusfsAction::Version => susfsd::show_version(),
             SusfsAction::Variant => susfsd::show_variant(),
