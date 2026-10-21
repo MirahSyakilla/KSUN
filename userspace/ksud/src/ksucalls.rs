@@ -1,5 +1,5 @@
 #![allow(clippy::unreadable_literal)]
-use anyhow::bail;
+use anyhow::{Result, bail};
 
 use crate::ksu_uapi;
 use std::fs;
