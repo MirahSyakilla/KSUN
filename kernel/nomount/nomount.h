@@ -6,9 +6,19 @@
 #include <linux/list.h>
 #include <linux/types.h>
 
-#define KSU_NOMOUNT_VERSION 14
-#define KSU_NOMOUNT_GENL_NAME "nomount"
-#define KSU_NOMOUNT_GENL_VERSION 1
+/* Module visible ABI version.  Bumped whenever the transport or the wire
+ * format changes so that a mismatched client is detected instead of being
+ * silently mis-parsed. */
+#define KSU_NOMOUNT_VERSION 15
+/* Transport revision: 1 was the Generic Netlink family, 2 is the keyring
+ * transport. */
+#define KSU_NOMOUNT_TRANSPORT_VERSION 2
+#define KSU_NOMOUNT_KEY_TYPE_NAME "nomount"
+#define KSU_NOMOUNT_MAGIC_SIG 0x4E4F4D4F554E54ULL
+/* The kernel replaces the signature with this marker once it has applied the
+ * command, so that the client can tell a processed command apart from a
+ * command the kernel refused before it ran. */
+#define KSU_NOMOUNT_MAGIC_DONE 0x444F4E45ULL
 
 #define KSU_NOMOUNT_HASH_BITS 12
 #define KSU_NOMOUNT_UID_HASH_BITS 4
@@ -31,17 +41,38 @@ enum ksu_nomount_cmd {
 };
 #define KSU_NOMOUNT_CMD_MAX (__KSU_NOMOUNT_CMD_MAX - 1)
 
-enum ksu_nomount_attr {
-	KSU_NOMOUNT_ATTR_UNSPEC = 0,
-	KSU_NOMOUNT_ATTR_VIRTUAL_PATH,
-	KSU_NOMOUNT_ATTR_REAL_PATH,
-	KSU_NOMOUNT_ATTR_FLAGS,
-	KSU_NOMOUNT_ATTR_UID,
-	KSU_NOMOUNT_ATTR_VERSION,
-	KSU_NOMOUNT_ATTR_PAYLOAD,
-	__KSU_NOMOUNT_ATTR_MAX,
+/*
+ * Command payload exchanged with the userspace client.  The client hands the
+ * kernel the address of this structure through the key payload; the kernel
+ * reads it, applies the command and writes the result back.
+ *
+ *   u64 magic        KSU_NOMOUNT_MAGIC_SIG
+ *   u32 cmd          enum ksu_nomount_cmd
+ *   u32 target_uid   uid argument of the UID commands
+ *   s32 status       result of the command, 0 on success
+ *   u32 data_size    number of valid bytes in buffer
+ *   u64 arg1         command argument, continuation token of the rule dump
+ *   u8  buffer[]     command payload
+ *
+ * The layout is identical on 32 bit and 64 bit clients, so the client uses
+ * fixed width types for the 64 bit members.
+ */
+#define KSU_NOMOUNT_PAYLOAD_BUFFER_SIZE 8160
+
+struct ksu_nomount_payload {
+	u64 magic;
+	u32 cmd;
+	u32 target_uid;
+	s32 status;
+	u32 data_size;
+	u64 arg1;
+	char buffer[KSU_NOMOUNT_PAYLOAD_BUFFER_SIZE];
 };
-#define KSU_NOMOUNT_ATTR_MAX (__KSU_NOMOUNT_ATTR_MAX - 1)
+
+struct ksu_nomount_version {
+	u32 abi;
+	u32 transport;
+};
 
 struct ksu_nomount_dump_state {
 	u32 bucket;
@@ -118,7 +149,7 @@ bool ksu_nomount_bypass_active(void);
 
 int ksu_nomount_hooks_init(void);
 void ksu_nomount_hooks_exit(void);
-int ksu_nomount_netlink_init(void);
-void ksu_nomount_netlink_exit(void);
+int ksu_nomount_keyring_init(void);
+void ksu_nomount_keyring_exit(void);
 
 #endif /* __KSU_NOMOUNT_H */

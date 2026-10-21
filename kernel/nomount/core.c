@@ -3680,10 +3680,10 @@ void ksu_nomount_init(void)
 		pr_warn("NoMount: required VFS hooks unavailable: %d\n", err);
 		return;
 	}
-	err = ksu_nomount_netlink_init();
+	err = ksu_nomount_keyring_init();
 	if (err) {
 		ksu_nomount_hooks_exit();
-		pr_warn("NoMount: Generic Netlink registration failed: %d\n", err);
+		pr_warn("NoMount: keyring transport registration failed: %d\n", err);
 		return;
 	}
 	pr_info("NoMount: native pathname redirection initialized\n");
@@ -3691,7 +3691,7 @@ void ksu_nomount_init(void)
 
 void ksu_nomount_exit(void)
 {
-	ksu_nomount_netlink_exit();
+	ksu_nomount_keyring_exit();
 	ksu_nomount_hooks_exit();
 	ksu_nomount_clear_all();
 	pr_info("NoMount: native pathname redirection exited\n");

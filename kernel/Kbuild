@@ -301,42 +301,12 @@ ifeq ($(CONFIG_KSU_HOOKLESS_NOMOUNT),y)
 ccflags-y += -DCONFIG_KSU_PHASE21_DEVPTS_FILTER=1
 kernelsu-objs += nomount/core.o
 kernelsu-objs += nomount/hooks.o
-kernelsu-objs += nomount/netlink.o
+kernelsu-objs += nomount/keyring.o
 
 ifeq ($(shell sed -n '/^int iterate_dir/,/^}/p' \
 	$(srctree)/fs/readdir.c 2>/dev/null | \
 	grep -Fq 'if (!file->f_op->iterate_shared)'; echo $$?),0)
 ccflags-y += -DKSU_NOMOUNT_ITERATE_SHARED_ONLY
-endif
-
-ifeq ($(shell sed -n '/^struct genl_family {/,/^};/p' \
-	$(srctree)/include/net/genetlink.h 2>/dev/null | \
-	grep -Eq 'nla_policy[[:space:]]+[*][[:space:]]*policy'; echo $$?),0)
-ccflags-y += -DKSU_NOMOUNT_GENL_FAMILY_HAS_POLICY
-endif
-ifeq ($(shell sed -n '/^struct genl_ops {/,/^};/p' \
-	$(srctree)/include/net/genetlink.h 2>/dev/null | \
-	grep -Eq 'nla_policy[[:space:]]+[*][[:space:]]*policy'; echo $$?),0)
-ccflags-y += -DKSU_NOMOUNT_GENL_OPS_HAS_POLICY
-endif
-ifeq ($(shell sed -n '/^struct genl_family {/,/^};/p' \
-	$(srctree)/include/net/genetlink.h 2>/dev/null | \
-	grep -Eq 'netnsok[[:space:]]*;'; echo $$?),0)
-ccflags-y += -DKSU_NOMOUNT_GENL_FAMILY_HAS_NETNSOK
-endif
-ifeq ($(shell sed -n '/^struct genl_family {/,/^};/p' \
-	$(srctree)/include/net/genetlink.h 2>/dev/null | \
-	grep -Eq 'module[[:space:]]*;'; echo $$?),0)
-ccflags-y += -DKSU_NOMOUNT_GENL_FAMILY_HAS_MODULE
-endif
-ifeq ($(shell sed -n '/^struct genl_family {/,/^};/p' \
-	$(srctree)/include/net/genetlink.h 2>/dev/null | \
-	grep -Eq 'genl_ops[[:space:]]+[*][[:space:]]*ops'; echo $$?),0)
-ccflags-y += -DKSU_NOMOUNT_GENL_FAMILY_HAS_OPS
-endif
-ifeq ($(shell grep -Eq 'genl_register_family_with_ops' \
-	$(srctree)/include/net/genetlink.h 2>/dev/null; echo $$?),0)
-ccflags-y += -DKSU_NOMOUNT_HAS_GENL_REGISTER_FAMILY_WITH_OPS
 endif
 endif
 

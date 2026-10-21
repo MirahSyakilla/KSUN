@@ -19,10 +19,11 @@ CONFIG_KSU_HOOKLESS_SUSFS=y
 CONFIG_KSU_HOOKLESS_NOMOUNT=y
 ```
 
-`KSU_HOOKLESS_NOMOUNT` also requires `NET`.  Android ARM64 4.19 and 5.4 are the
+`KSU_HOOKLESS_NOMOUNT` also requires `KEYS` (the `nomount` key type) and
+`ARM64`.  Android ARM64 4.19 and 5.4 are the
 supported targets.  Initialization is fail-closed: if a required pathname,
 directory, permission, `d_path`, `vfs_getattr_nosec`, or `statfs` probe cannot
-be registered, the Generic Netlink family is not exposed.
+be registered, the keyring transport is not exposed.
 
 ## Architecture
 
@@ -33,7 +34,7 @@ NoMount owns:
 - real/visible inode identity metadata
 - backend ancestor and private-directory policy
 - UID exclusions
-- the `nomount` Generic Netlink family
+- the `nomount` key type
 
 The runtime redirects the two native filename constructors, so every new
 pathname lookup evaluates current policy before the global dcache is used.
@@ -89,21 +90,57 @@ private backend through another pathname in the same syscall.
 checked in the filename constructor and in readdir, block/unblock and rule
 deletion do not depend on dropping global dentries.
 
-## Netlink ABI
+## Keyring transport ABI
 
-The public ABI remains:
+The public ABI is:
 
-- family name `nomount`
-- family version `1`
-- module ABI version `13`
+- key type name `nomount`
+- transport version `2`
+- module ABI version `15`
 - commands `GET_VERSION`, `ADD_RULE`, `DEL_RULE`, `CLEAR_ALL`, `ADD_UID`,
   `DEL_UID`, and `GET_LIST`
 
-String attributes and the existing packed batch format are supported.  Packed
-messages are fully shape-checked before any rule is changed and embedded NULs
-are rejected.  Kbuild inspects the actual Generic Netlink structure layout so
-old kernels receive per-operation policy while newer kernels receive family
-policy.
+The runtime is driven the way upstream NoMount drives it: the client hands the
+kernel the address of a command payload with `add_key(2)` using the `nomount`
+key type, and the kernel applies the command while the key type preparses that
+payload.  The key is never instantiated, so the command is applied exactly
+once and nothing is left behind in a keyring.
+
+The permission check lives in the preparse callback and requires
+`CAP_SYS_ADMIN` in the *initial* user namespace.  `capable()` resolves
+against `init_user_ns`, so an app that unshares a user namespace and holds
+`CAP_SYS_ADMIN` only inside it is rejected.  This is why the transport is not
+a Generic Netlink family: `GENL_ADMIN_PERM` resolves to
+`ns_capable(sock_net(skb)->user_ns, CAP_NET_ADMIN)`, which an app satisfies by
+unsharing a user *and* a network namespace, and NoMount rules are global, so
+such an app could install system-wide rules.
+
+The command payload is a single fixed size structure that the kernel reads
+from and writes back to the client:
+
+```text
+u64 magic        "NOMOUNT" signature
+u32 cmd          command number
+u32 target_uid   uid argument of the UID commands
+s32 status       result of the command, 0 on success
+u32 data_size    number of valid bytes in buffer
+u64 arg1         command argument, continuation token of the rule dump
+u8  buffer[]     command payload
+```
+
+The packed batch format is unchanged: `ADD_RULE` carries `u32 flags | u16
+v_len | u16 r_len` records followed by the virtual and real pathnames,
+`DEL_RULE` carries `u16 v_len` records followed by the virtual pathname.
+Batches are fully shape-checked before any rule is changed and embedded NULs
+are rejected.  Rules are global: one rule per virtual path, matched exactly
+or as a directory prefix, with the whiteout carried in the record flags.
+Upstream's per-UID rule scoping is not implemented, and the client reports
+the commands this kernel does not implement (`CLEAR_RULES`, `CLEAR_UIDS`,
+`GET_UIDS`, `BLOCK_ISOLATED_UIDS`) as unsupported.
+
+`GET_LIST` pages through the rule table: the kernel returns as many records
+as fit into the payload buffer and stores the continuation token in `arg1`,
+which the client sends back with the next command.
 
 ## Compatibility limits
 
@@ -124,9 +161,15 @@ policy.
 No build, flash, or live-device validation status should be inferred from this
 document; those are separate release checks.
 
-## Version 14
+## Version 15
 
-The NoMount ABI version is 14. The runtime is modelled on
+The NoMount ABI version is 15 and the transport version is 2. Version 14 and
+transport version 1 were the Generic Netlink family; the transport was
+replaced by the keyring transport because the netlink family could be reached
+from a user namespace and therefore allowed an unprivileged app to install
+global NoMount rules.
+
+The runtime is modelled on
 `maxsteeel/nomount` `master` (v2.1.1, `NOMOUNT_BASE_VERSION` 21) rather
 than copied from it, so the version numbers are independent of upstream's
 and only mean "this tree's NoMount ABI".

@@ -164,16 +164,22 @@ config KSU_HOOKLESS_SUSFS
 config KSU_HOOKLESS_NOMOUNT
 	bool "KernelSU hookless NoMount"
 	depends on KSU_HOOKLESS_SUSFS
-	depends on NET
+	depends on KEYS
 	depends on ARM64
 	depends on KALLSYMS
 	default y
 	help
 	  Enable a KernelSU-hosted NoMount-compatible VFS redirection
 	  runtime. This keeps NoMount out of fs/ and redirects pathnames at
-	  the native filename constructors, while preserving the Generic
-	  Netlink family and command ABI used by the existing nm userspace
+	  the native filename constructors, while preserving the keyring
+	  transport and command ABI used by the existing nm userspace
 	  tool.
+
+	  The runtime is driven through a "nomount" key type: the client
+	  hands the kernel a one-shot command with add_key(2), and the
+	  kernel applies it while the key type parses that payload. The
+	  permission check requires CAP_SYS_ADMIN in the initial user
+	  namespace, so an unprivileged app cannot install NoMount rules.
 
 	  This implementation supports exact child injection, replacement,
 	  whiteout, synthetic intermediate virtual directories, UID

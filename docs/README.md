@@ -36,8 +36,8 @@ The vendor kernel sources are **not modified** to add interception points. The
 binary patching of structures that already exist in the compiled kernel.
 
 **Versions:** SUSFS runtime `v2.3.0` (project-local variant designation
-`hookless-v0.4`; not an upstream susfs release) · NoMount netlink family version `1`,
-module ABI version `13`.
+`hookless-v0.4`; not an upstream susfs release) · NoMount keyring transport
+version `2`, module ABI version `15`.
 
 ---
 
@@ -50,7 +50,7 @@ module ABI version `13`.
   implemented as a 7-callsite branch-link rewrite of the compiled
   `slow_avc_audit()` callers; runtime validated on the reference device).
 - Hookless NoMount (path redirection, whiteouts, synthetic directories, UID blocking,
-  packed netlink ABI).
+  keyring transport ABI).
 - Syscall-table tampering, native and AArch32 compat.
 - ARM64 Branch Link families (permission / d_path / getattr / getname / iterate_dir /
   stat / exec / mount).
@@ -106,12 +106,12 @@ CONFIG_KSU_HOOKLESS_NOMOUNT=y
 - `CONFIG_KALLSYMS=y` and `CONFIG_KALLSYMS_ALL=y` — required by the branch-link
   symbol scanner (`KSU_HOOKLESS_NOMOUNT` depends on `KALLSYMS`; the scanner resolves
   call sites and boundaries through kallsyms).
-- `CONFIG_KSU_HOOKLESS_NOMOUNT` additionally `depends on NET` (Generic Netlink
-  family `nomount`) and `ARM64`.
+- `CONFIG_KSU_HOOKLESS_NOMOUNT` additionally `depends on KEYS` (the `nomount` key
+  type) and `ARM64`.
 - `CONFIG_EXT4_FS` is required by `CONFIG_KSU` itself.
 - The branch-link scanner and SUSFS/NoMount Kbuild probes read your kernel sources at
   build time to select compatibility paths (e.g. hlist vs list LSM hooks,
-  `iterate_shared`, genetlink policy layout); no manual action is needed, but exotic
+  `iterate_shared`); no manual action is needed, but exotic
   trees may fail the probes and disable the affected optional path.
 
 ### KPROBES / KRETPROBES
