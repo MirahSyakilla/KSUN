@@ -9,6 +9,7 @@
 #include <linux/err.h>
 #include <linux/cred.h>
 #include <linux/ptrace.h>
+#include <linux/uaccess.h>
 
 #include "arch.h"
 
@@ -59,6 +60,15 @@
 
 #define ksu_sys_setns(fd, flags) ({ ksyscall(setns, fd, flags); })
 #endif
+
+static inline void __user *userspace_stack_buffer(const void *d, size_t len)
+{
+    // To avoid having to mmap a page in userspace, just write below the stack
+    // pointer.
+    char __user *p = (void __user *)current_user_stack_pointer() - len;
+
+    return copy_to_user(p, d, len) ? NULL : p;
+}
 
 static inline struct file *ksu_filp_open_nonotify(const char *path, int flags)
 {

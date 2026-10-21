@@ -149,6 +149,9 @@ void __init ksu_syscall_hook_manager_init(void)
 #ifdef __NR_execve
     ksu_register_syscall_hook(__NR_execve, ksu_hook_execve);
 #endif
+#ifdef __NR_execveat
+    ksu_register_syscall_hook(__NR_execveat, ksu_hook_execveat);
+#endif
 #ifdef __NR_newfstatat
     ksu_register_syscall_hook(__NR_newfstatat, ksu_hook_newfstatat);
 #endif
@@ -221,6 +224,9 @@ void __exit ksu_syscall_hook_manager_exit(void)
     ksu_unregister_syscall_hook(__NR_setresuid);
 #ifdef __NR_execve
     ksu_unregister_syscall_hook(__NR_execve);
+#endif
+#ifdef __NR_execveat
+    ksu_unregister_syscall_hook(__NR_execveat);
 #endif
 #ifdef __NR_newfstatat
     ksu_unregister_syscall_hook(__NR_newfstatat);

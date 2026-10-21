@@ -1187,6 +1187,15 @@ fun ModuleItem(
                                 )
                             )
                         }
+                        module.preinitWarning()?.let {
+                            LabelItem(
+                                text = stringResource(it),
+                                style = LabelItemDefaults.style.copy(
+                                    containerColor = MaterialTheme.colorScheme.errorContainer,
+                                    contentColor = MaterialTheme.colorScheme.onErrorContainer
+                                )
+                            )
+                        }
                         if (module.enabled && !module.remove) {
                             if (module.hasWebUi && filterZygiskModules) {
                                 LabelItem(

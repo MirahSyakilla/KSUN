@@ -212,7 +212,8 @@ pub fn load(kmi: Option<&str>) -> Result<()> {
     let params = CString::new("").expect("empty module parameters are valid");
 
     info!("Loading SUSFS guard LKM for KMI {kmi}");
-    ksuinit::load_module(&module_data, &params).context("Failed to load SUSFS guard LKM")?;
+    crate::debug::load_module_image(&module_data, &params)
+        .context("Failed to load SUSFS guard LKM")?;
     println!("Loaded SUSFS guard LKM for KMI {kmi}");
     Ok(())
 }

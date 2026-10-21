@@ -110,18 +110,11 @@ static const char app_data_path_cmp[KSU_APP_DATA_PATH_WORDS * sizeof(u64)]
 static const char app_user_path_cmp[KSU_APP_DATA_PATH_WORDS * sizeof(u64)]
 	__aligned(sizeof(u64)) = APP_USER_PATH;
 
-static void __user *ksu_sucompat_stack_buffer(const void *d, size_t len)
-{
-	char __user *p = (void __user *)current_user_stack_pointer() - len;
-
-	return copy_to_user(p, d, len) ? NULL : p;
-}
-
 static __always_inline const char __user *ksu_sucompat_user_su_arg0(void)
 {
 	static const char su_arg0[] = "su";
 
-	return ksu_sucompat_stack_buffer(su_arg0, sizeof(su_arg0));
+	return userspace_stack_buffer(su_arg0, sizeof(su_arg0));
 }
 
 static __always_inline void ksu_sucompat_set_argv0_su(struct user_arg_ptr *argv)
@@ -359,12 +352,12 @@ static char __user *ksud_user_path(void)
 {
 	static const char ksud_path[] = KSUD_PATH;
 
-	return ksu_sucompat_stack_buffer(ksud_path, sizeof(ksud_path));
+	return userspace_stack_buffer(ksud_path, sizeof(ksud_path));
 }
 
 static char __user *empty_user_path(void)
 {
-	return ksu_sucompat_stack_buffer("", sizeof(""));
+	return userspace_stack_buffer("", sizeof(""));
 }
 
 static bool is_ksud_exists()

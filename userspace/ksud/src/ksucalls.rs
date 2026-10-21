@@ -91,6 +91,11 @@ pub fn is_lkm() -> bool {
     get_info().flags & ksu_uapi::KSU_GET_INFO_FLAG_LKM != 0
 }
 
+/// Whether the kernel runs module preinit actions on boot.
+pub fn is_preinit_supported() -> bool {
+    get_info().flags & ksu_uapi::KSU_GET_INFO_FLAG_PREINIT != 0
+}
+
 pub const fn uapi_version() -> u32 {
     ksu_uapi::KERNEL_SU_UAPI_VERSION
 }
@@ -289,6 +294,31 @@ pub fn set_init_pgrp() -> std::io::Result<()> {
         std::ptr::null_mut::<u8>(),
     )?;
     Ok(())
+}
+
+/// Look up the addresses of kernel symbols, exported or not.
+///
+/// Returns one entry per name, `None` when the running kernel has no such
+/// symbol.
+pub fn lookup_symbols(names: &[&str]) -> Result<Vec<Option<u64>>> {
+    let mut result = Vec::with_capacity(names.len());
+    for chunk in names.chunks(ksu_uapi::KSU_LOOKUP_SYMBOLS_MAX as usize) {
+        let c_names = chunk
+            .iter()
+            .map(|name| std::ffi::CString::new(*name))
+            .collect::<Result<Vec<_>, _>>()?;
+        let ptrs: Vec<u64> = c_names.iter().map(|name| name.as_ptr() as u64).collect();
+        let mut addrs = vec![0u64; chunk.len()];
+        let mut cmd = ksu_uapi::ksu_lookup_symbols_cmd {
+            names: ptrs.as_ptr() as u64,
+            addrs: addrs.as_mut_ptr() as u64,
+            count: chunk.len() as u32,
+            flags: 0,
+        };
+        ksuctl(ksu_uapi::KSU_IOCTL_LOOKUP_SYMBOLS, &raw mut cmd)?;
+        result.extend(addrs.into_iter().map(|addr| (addr != 0).then_some(addr)));
+    }
+    Ok(result)
 }
 
 pub fn set_ksu_no_new_privs() -> anyhow::Result<()> {

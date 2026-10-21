@@ -1,6 +1,6 @@
 use anyhow::{Context, Ok, Result, bail, ensure};
 use std::{
-    ffi::CString,
+    ffi::{CStr, CString},
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -51,15 +51,36 @@ pub fn set_manager(pkg: &str) -> Result<()> {
     Ok(())
 }
 
+// KSU_IOCTL_LOOKUP_SYMBOLS was introduced in UAPI v6. Prefer resolving the
+// module's undefined (non-exported) symbols through it; older kernels, or a
+// failed lookup, fall back to /proc/kallsyms.
+const LOOKUP_SYMBOL_UAPI_VERSION: u32 = 6;
+
+/// Load a kernel module image, binding its undefined symbols through the
+/// kernel's own symbol lookup when it is available.
+pub fn load_module_image(module_data: &[u8], params: &CStr) -> Result<()> {
+    if ksucalls::get_info().uapi_version >= LOOKUP_SYMBOL_UAPI_VERSION {
+        ksuinit::load_module_with_resolver(module_data, params, |names| {
+            ksucalls::lookup_symbols(names).or_else(|e| {
+                log::warn!("kernel symbol lookup failed: {e:#}, using /proc/kallsyms");
+                ksuinit::resolve_kallsyms(names)
+            })
+        })
+    } else {
+        log::info!("kernel symbol lookup unsupported, using /proc/kallsyms");
+        ksuinit::load_module(module_data, params)
+    }
+}
+
 pub fn insmod(module: &Path, params: &[String]) -> Result<()> {
     let module = module
         .canonicalize()
         .with_context(|| format!("resolve module path failed: {}", module.display()))?;
+    let cparams = CString::new(params.join(" "))?;
     let module_data =
         fs::read(&module).with_context(|| format!("read module failed: {}", module.display()))?;
-    let cparams = CString::new(params.join(" "))?;
 
-    ksuinit::load_module(&module_data, &cparams)
+    load_module_image(&module_data, &cparams)
         .with_context(|| format!("load module failed: {}", module.display()))?;
 
     println!("Loaded kernel module: {}", module.display());

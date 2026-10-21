@@ -4,6 +4,7 @@
 #include "linux/printk.h"
 #include "selinux/selinux.h"
 #include <asm/syscall.h>
+#include <linux/fcntl.h>
 #include <linux/ptrace.h>
 #include <linux/static_key.h>
 
@@ -19,6 +20,7 @@
 #include "hook/syscall_hook.h"
 #include "hook/syscall_event_bridge.h"
 #include "feature/adb_root.h"
+#include "preinit/preinit.h"
 #ifdef CONFIG_KSU_HACK_ARM64_BRANCH_LINK
 #include "hook/arm64/branch_link_hook.h"
 #endif
@@ -98,16 +100,27 @@ void ksu_stop_ksud_execve_hook()
 
 long __nocfi ksu_hook_execve(int orig_nr, const struct pt_regs *regs)
 {
-#ifdef CONFIG_KSU_HACK_ARM64_BRANCH_LINK
-    /* Branch-link owns this syscall only after its complete manifest commits. */
-    if (ksu_branch_link_exec_ready())
-        return ksu_invoke_syscall_nr(orig_nr, regs);
-#endif
     const char __user **filename_user = (const char __user **)&PT_REGS_PARM1(regs);
     const char __user *const __user *argv_user = (const char __user *const __user *)PT_REGS_PARM2(regs);
     bool current_is_init = is_init(current_cred());
     struct ksu_sulog_pending_event *pending_root_execve = NULL;
     long ret;
+
+    /*
+     * The preinit runner has to be swapped in on PID 1's very first exec,
+     * before the SELinux policy is loaded.  It replaces the exec target
+     * itself, so it must run *before* the branch-link fast path below,
+     * which only rewrites exec targets.
+     */
+    if (unlikely(current->pid == 1) &&
+        ksu_preinit_handle_execve(filename_user, argv_user, orig_nr, (struct pt_regs *)regs, &ret))
+        return ret;
+
+#ifdef CONFIG_KSU_HACK_ARM64_BRANCH_LINK
+    /* Branch-link owns this syscall only after its complete manifest commits. */
+    if (ksu_branch_link_exec_ready())
+        return ksu_invoke_syscall_nr(orig_nr, regs);
+#endif
 
     if (static_branch_unlikely(&ksud_execve_key))
         ksu_execve_hook_ksud(regs);
@@ -130,6 +143,24 @@ long __nocfi ksu_hook_execve(int orig_nr, const struct pt_regs *regs)
     ret = ksu_invoke_syscall_nr(orig_nr, regs);
     ksu_sulog_emit_pending(pending_root_execve, ret, GFP_KERNEL);
     return ret;
+}
+
+long __nocfi ksu_hook_execveat(int orig_nr, const struct pt_regs *regs)
+{
+    const char __user **filename_user = (const char __user **)&PT_REGS_PARM2(regs);
+    const char __user *const __user *argv_user = (const char __user *const __user *)PT_REGS_PARM3(regs);
+    long ret;
+
+    /*
+     * Newer Android releases' init execs selinux_setup with execveat()
+     * rather than execve().  Only an AT_EMPTY_PATH exec of an fd has no
+     * path for preinit to swap.
+     */
+    if (unlikely(current->pid == 1) && !(PT_REGS_PARM5(regs) & AT_EMPTY_PATH) &&
+        ksu_preinit_handle_execve(filename_user, argv_user, orig_nr, (struct pt_regs *)regs, &ret))
+        return ret;
+
+    return ksu_invoke_syscall_nr(orig_nr, regs);
 }
 
 long __nocfi ksu_hook_setresuid(int orig_nr, const struct pt_regs *regs)

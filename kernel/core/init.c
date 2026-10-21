@@ -30,6 +30,7 @@
 #include "feature/sulog.h"
 #include "feature/suspect_uid.h"
 #include "infra/symbol_resolver.h"
+#include "preinit/preinit.h"
 #include "selinux/execmem_compat.h"
 #ifdef CONFIG_KSU_HOOKLESS_SUSFS
 #include "susfs/susfs.h"
@@ -223,6 +224,8 @@ int __init kernelsu_init(void)
 
 		ksu_ksud_init();
 
+		ksu_preinit_init();
+
 		ksu_file_wrapper_init();
 	}
 
@@ -250,8 +253,10 @@ void __exit kernelsu_exit(void)
 	ksu_susfs_exit();
 #endif
 
-	if (!ksu_late_loaded)
+	if (!ksu_late_loaded) {
 		ksu_ksud_exit();
+		ksu_preinit_exit();
+	}
 
 	// Wait for any in-flight RCU readers (e.g. handler traversing allow_list)
 	synchronize_rcu();

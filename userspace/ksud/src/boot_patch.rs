@@ -473,6 +473,10 @@ pub struct BootPatchArgs {
     /// Do not load custom rc
     #[arg(long, default_value = "false")]
     no_custom_rc: bool,
+
+    /// Do not run module preinit actions
+    #[arg(long, default_value = "false")]
+    no_preinit: bool,
 }
 
 pub fn patch(args: BootPatchArgs) -> Result<()> {
@@ -497,6 +501,7 @@ pub fn patch(args: BootPatchArgs) -> Result<()> {
             #[cfg(target_os = "android")]
             partition,
             no_custom_rc,
+            no_preinit,
         } = args;
 
         #[cfg(target_os = "android")]
@@ -660,6 +665,7 @@ pub fn patch(args: BootPatchArgs) -> Result<()> {
 
         apply_config("no custom rc", "norc=1", no_custom_rc);
         apply_config("allow shell", "allow_shell=1", allow_shell);
+        apply_config("no preinit", "preinit=0", no_preinit);
 
         if ksu_config.is_empty() {
             cpio.rm("ksu_config", false);
