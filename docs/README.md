@@ -36,7 +36,7 @@ The vendor kernel sources are **not modified** to add interception points. The
 binary patching of structures that already exist in the compiled kernel.
 
 **Versions:** SUSFS runtime `v2.3.0` (project-local variant designation
-`hookless-v0.4`; not an upstream susfs release) · NoMount keyring transport
+`hookless-v0.5`; not an upstream susfs release) · NoMount keyring transport
 version `2`, module ABI version `15`.
 
 ---

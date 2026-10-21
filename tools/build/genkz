@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Build kernel + package AnyKernel3 zip into ~/KernelReleases/
+set -e
+source "$HOME/bin/kbuild.env"
+cd "${KERNEL_SRC:-$HOME/kernels/meowkernel}"
+export CCACHE_DIR="$HOME/.ccache"
+ccache -M 20G >/dev/null 2>&1 || true
+make O=out -j"$(nproc)" ak3 "$@"

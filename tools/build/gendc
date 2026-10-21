@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Generate .config for MeowKernel (Xiaomi lisa / sm8350).
+# Order matters: *_defconfig OVERWRITES .config, *.config MERGES into it.
+# The QGKI fragment must be named *.config (not *_defconfig) or it clobbers
+# CONFIG_MACH_XIAOMI_LISA and the dtbo build produces zero overlays.
+set -e
+source "$HOME/bin/kbuild.env"
+K="${KERNEL_SRC:-$HOME/kernels/meowkernel}"
+cd "$K"
+for step in \
+    lisa_defconfig \
+    vendor/xiaomi-qgki.config \
+    vendor/debugfs.config \
+    vendor/localversion.config
+do
+  echo ">>> config step: $step"
+  make O=out "$step"
+done
+echo ">>> effective config:"
+grep -E '^CONFIG_LOCALVERSION=' out/.config
+grep -E '^CONFIG_(MACH_XIAOMI_LISA|QGKI|KSU|MMC_CQHCI_CRYPTO_QTI)=' out/.config
