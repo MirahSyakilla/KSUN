@@ -123,3 +123,10 @@ policy.
 
 No build, flash, or live-device validation status should be inferred from this
 document; those are separate release checks.
+
+## Version 14
+
+The NoMount ABI version is 14. The runtime is modelled on
+`maxsteeel/nomount` `master` (v2.1.1, `NOMOUNT_BASE_VERSION` 21) rather
+than copied from it, so the version numbers are independent of upstream's
+and only mean "this tree's NoMount ABI".

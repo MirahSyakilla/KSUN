@@ -37,7 +37,7 @@
 #define KSU_SUSFS_HASH_BITS 8
 #define KSU_SUSFS_SB_HASH_BITS 4
 #define KSU_SUSFS_SIGNATURE 0x53555346534b5355ULL
-#define KSU_SUSFS_VERSION "v2.3.0"
+#define KSU_SUSFS_VERSION "v2.4.0"
 #define KSU_SUSFS_VARIANT "hookless-v0.4"
 #define KSU_SUSFS_AS_OPEN_REDIRECT 36
 
@@ -1685,6 +1685,13 @@ static bool ksu_susfs_handle_features_compat(void __user *arg)
 	len += scnprintf(cmd->enabled_features + len,
 			 sizeof(cmd->enabled_features) - len,
 			 "hookless_vfs\nhookless_procfs\nsus_path\nsus_path_loop\n");
+	/* Reported only once something has actually been dropped, so the
+	 * feature list stays a statement about what is active rather than
+	 * about what may happen. */
+	if (ksu_susfs_show_hides_count() > 0)
+		len += scnprintf(cmd->enabled_features + len,
+				 sizeof(cmd->enabled_features) - len,
+				 "sus_map_line_hides\n");
 #ifdef CONFIG_KSU_HACK_ARM64_BRANCH_LINK
 	if (ksu_susfs_open_redirect_runtime_ready())
 		len += scnprintf(cmd->enabled_features + len,

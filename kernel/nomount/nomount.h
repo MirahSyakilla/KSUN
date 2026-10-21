@@ -6,7 +6,7 @@
 #include <linux/list.h>
 #include <linux/types.h>
 
-#define KSU_NOMOUNT_VERSION 13
+#define KSU_NOMOUNT_VERSION 14
 #define KSU_NOMOUNT_GENL_NAME "nomount"
 #define KSU_NOMOUNT_GENL_VERSION 1
 

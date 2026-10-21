@@ -316,3 +316,21 @@ This is the intended long-term maintenance model for the Lisa target:
 - no generic-kernel manual hooks
 - no SUSFS files spread through the main tree
 - all feature work isolated inside `KernelSU-Next`
+
+## Version 2.4.0
+
+The hookless SUSFS runtime is tracked as 2.4.0.
+
+* `sus_map` counts the lines its show probes drop, and reports the count
+  as `sus_map_line_hides` in the enabled-features list. Upstream
+  susfs4ksu keeps the same counter for the same reason: a vendor kernel
+  whose walk counters all move while this one stays at zero is the
+  fingerprint of an inlined `show_map_vma`, and the two cases have to be
+  told apart. The feature is listed only once something has actually been
+  dropped, so the list stays a statement about what is active.
+
+Upstream's SUSFS is a loadable module and this tree's is not, so the
+upstream sources are used as a specification rather than as a source of
+code. Features that need the module's own machinery - the readlink face
+gated by swapping the inode's `i_op`, the 64-entry mount keep list, the
+LKM control nodes - are not yet present here and are tracked separately.

@@ -623,6 +623,20 @@ static bool ksu_susfs_sus_map_match_vma(struct vm_area_struct *vma)
 	return ksu_susfs_sus_map_match_inode(file_inode(vma->vm_file));
 }
 
+/* Lines dropped by the show_map / show_map_vma / show_smap probes.
+ *
+ * This is the decision, not the walk: kept apart from the walk-layer
+ * counters so that a vendor kernel with every walk counter moving and
+ * this one stuck at zero can be told apart from one that is genuinely
+ * not hiding anything.  Ported from upstream susfs4ksu's line_hides
+ * counter (susfs4ksu-lkm#102). */
+static atomic_t ksu_susfs_n_show_hides = ATOMIC_INIT(0);
+
+int ksu_susfs_show_hides_count(void)
+{
+	return atomic_read(&ksu_susfs_n_show_hides);
+}
+
 static bool ksu_susfs_sus_map_hide_vma_current(struct vm_area_struct *vma,
 					       struct mm_struct *locked_mm)
 {
@@ -1393,6 +1407,7 @@ static void ksu_susfs_show_map_vma(struct seq_file *m,
 	const char *name = NULL;
 
 	if (ksu_susfs_sus_map_hide_vma_current(vma, vma ? vma->vm_mm : NULL)) {
+		atomic_inc(&ksu_susfs_n_show_hides);
 		return;
 	}
 
@@ -1470,6 +1485,7 @@ static int ksu_susfs_show_map(struct seq_file *m, void *v)
 
 	vma = ksu_susfs_get_data_vma(orig_vma);
 	if (ksu_susfs_sus_map_hide_vma_current(vma, vma ? vma->vm_mm : NULL)) {
+		atomic_inc(&ksu_susfs_n_show_hides);
 		ksu_susfs_m_cache_vma(m, orig_vma);
 		ksu_susfs_put_data_vma(orig_vma, vma);
 		return 0;
@@ -1620,6 +1636,7 @@ static int ksu_susfs_show_smap(struct seq_file *m, void *v)
 
 	vma = ksu_susfs_get_data_vma(orig_vma);
 	if (ksu_susfs_sus_map_hide_vma_current(vma, vma ? vma->vm_mm : NULL)) {
+		atomic_inc(&ksu_susfs_n_show_hides);
 		ksu_susfs_m_cache_vma(m, orig_vma);
 		ksu_susfs_put_data_vma(orig_vma, vma);
 		return 0;
@@ -2065,6 +2082,7 @@ static int ksu_susfs_show_smaps_rollup(struct seq_file *m, void *v)
 	for (vma = ksu_susfs_first_vma(mm); vma;
 	     vma = ksu_susfs_next_vma(mm, vma)) {
 		if (ksu_susfs_sus_map_hide_vma_current(vma, mm)) {
+			atomic_inc(&ksu_susfs_n_show_hides);
 			last_vma_end = vma->vm_end;
 			continue;
 		}
