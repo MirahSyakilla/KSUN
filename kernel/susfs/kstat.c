@@ -670,7 +670,7 @@ bool ksu_susfs_readlink_should_be_enoent(int dfd, const char __user *pathname)
 {
 	struct path path;
 	bool hidden = false;
-	int empty = 0;
+	bool empty = false;
 	int err;
 
 	/* The same gate the stat family applies: a root or zygote-side reader
@@ -680,8 +680,10 @@ bool ksu_susfs_readlink_should_be_enoent(int dfd, const char __user *pathname)
 
 	/* LOOKUP_EMPTY and no final follow: the same lookup do_readlinkat()
 	 * performs, so the resolved object is the one the caller asked
-	 * about. */
-	err = user_path_at_empty(dfd, pathname, LOOKUP_EMPTY, &path, &empty);
+	 * about.  The kernel's own spelling of that lookup changed in
+	 * v5.8, so the call is selected by capability rather than by
+	 * version; see ksu_susfs_readlink_lookup(). */
+	err = ksu_susfs_readlink_lookup(dfd, pathname, &path, &empty);
 	if (err)
 		return false;
 	/* An "empty" path (the empty string) is answered -ENOENT by the
@@ -3528,6 +3530,15 @@ static int ksu_susfs_kallsyms_show(struct seq_file *m, void *v)
 	if (ret || !m->buf || m->count <= before)
 		return ret;
 
+	/* The region has to start on a line boundary.  A seq buffer that
+	 * overflowed inside the original's write is reset and refilled from
+	 * its start, so the count can be larger than it was without the
+	 * region actually being the line that was written.  The byte in
+	 * front of the region tells the two apart: only an unflushed buffer
+	 * ends a line exactly there. */
+	if (before > 0 && m->buf[before - 1] != '\n')
+		return ret;
+
 	if (ksu_susfs_kallsyms_line_hidden(m->buf + before, m->count - before)) {
 		/* Drop the line.  The buffer holds whole lines only, so
 		 * rewinding the count removes exactly this symbol and
@@ -3593,7 +3604,12 @@ int ksu_susfs_kstat_init(void)
 
 	/* The kallsyms show callback is hooked the same way the maps and
 	 * smaps ones are: the table is patched, not probed.  A failure here
-	 * is not fatal - the ksu_/susfs_ symbols simply stay visible. */
+	 * is not fatal - the ksu_/susfs_ symbols simply stay visible.
+	 *
+	 * kallsyms_op is a *static* object in kernel/kallsyms.c, so it is only
+	 * listed in /proc/kallsyms - and therefore only resolvable - when the
+	 * kernel exports every symbol.  Without that the face cannot be armed
+	 * at all, and it says so instead of pretending to hide something. */
 	addr = find_kernel_symbol_exact("kallsyms_op");
 	if (addr) {
 		ksu_susfs_kallsyms_seqops = (const struct seq_operations *)addr;
@@ -3609,7 +3625,11 @@ int ksu_susfs_kstat_init(void)
 			pr_info("susfs: kallsyms show wrapped, ksu_/susfs_ symbols are hidden\n");
 		}
 	} else {
+#ifdef KSU_SUSFS_HAS_KALLSYMS_ALL
 		pr_warn("susfs: kallsyms_op not found - ksu_/susfs_ symbols stay visible in /proc/kallsyms\n");
+#else
+		pr_warn("susfs: kallsyms_op not found (CONFIG_KALLSYMS_ALL is off, so the kernel's own kallsyms table is not listed) - ksu_/susfs_ symbols stay visible in /proc/kallsyms\n");
+#endif
 	}
 
 #ifdef KSU_SUSFS_HAS_SMAPS_ROLLUP

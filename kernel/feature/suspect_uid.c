@@ -230,6 +230,14 @@ static kuid_t ksu_suspect_uid_query(kuid_t caller, kuid_t who)
 	return replacement;
 }
 
+/*
+ * The oracle is closed by hooking getpriority()/setpriority(), and the
+ * syscall hook machinery belongs to the hook-core profile: the manual-hook
+ * profile carries its hooks in the kernel source and has no dispatcher to
+ * register a handler with.  The feature is therefore compiled out there
+ * and says so, instead of leaving an oracle open that nothing closes.
+ */
+#ifdef CONFIG_KSU_HOOK_CORE
 static long __nocfi ksu_suspect_uid_getpriority(int orig_nr,
 						 const struct pt_regs *regs)
 {
@@ -284,6 +292,7 @@ static long __nocfi ksu_suspect_uid_setpriority(int orig_nr,
 
 	return ksu_invoke_syscall(fn, &args);
 }
+#endif /* CONFIG_KSU_HOOK_CORE */
 
 int ksu_suspect_uid_hide(kuid_t target)
 {
@@ -443,6 +452,7 @@ __u32 ksu_suspect_uid_max(void)
 
 int ksu_suspect_uid_init(void)
 {
+#ifdef CONFIG_KSU_HOOK_CORE
 	int ret;
 	int reg = 0;
 
@@ -481,6 +491,13 @@ int ksu_suspect_uid_init(void)
 	pr_info("suspect_uid: uid oracle hiding ready (%d syscall(s), both ABIs)\n",
 		reg);
 	return 0;
+#else
+	/* No dispatcher to register with in this profile: the oracle cannot
+	 * be closed here, and saying so is better than leaving a policy
+	 * table that nothing consults. */
+	pr_warn("suspect_uid: uid oracle hiding needs the hook core (CONFIG_KSU_HOOK_CORE), disabled\n");
+	return -EOPNOTSUPP;
+#endif
 }
 
 void ksu_suspect_uid_exit(void)
@@ -494,8 +511,10 @@ void ksu_suspect_uid_exit(void)
 			ksu_suspect_caller_masks[i].used = false;
 		spin_unlock_irqrestore(&ksu_suspect_uid_lock, flags);
 	}
+#ifdef CONFIG_KSU_HOOK_CORE
 	ksu_unregister_syscall_hook(__NR_getpriority);
 	ksu_unregister_syscall_hook(__NR_setpriority);
+#endif
 }
 
 /*

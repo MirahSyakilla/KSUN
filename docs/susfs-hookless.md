@@ -221,6 +221,10 @@ still covered.
 - `CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS`
 
 That knob is symbol-hardening work, not required for the hookless migration.
+The behaviour itself is now here, but not as a knob: the `ksu_`/`susfs_`
+symbols are hidden by the kallsyms face, which is armed at runtime when the
+kernel's `kallsyms_op` table can be resolved, and it is reported as
+`hide_ksu_susfs_symbols` in the enabled-features list.
 
 ## Safety Rules
 
@@ -303,6 +307,122 @@ required VFS and KernelSU hook interfaces; supporting them would amount to a
 separate infrastructure backport rather than a maintainable compatibility
 layer.
 
+## Kernel version support
+
+The section above is about the MM and VFS plumbing. This one is the per
+feature answer: which kernel API each feature stands on, the oldest kernel on
+which it works as described, and what happens below that.
+
+The rule the whole tree follows is that a feature is either **working** or
+**reported as not armed**. Nothing is compiled in on the assumption that an
+API exists, and nothing is silently dropped: the interception layer publishes
+what it managed to install, and the enabled-features list reports what is
+live (`sus_path_readlink`, `sus_path_opath`, `hide_ksu_susfs_symbols`).
+
+| Feature | Kernel API it stands on | Minimum | On older kernels |
+| --- | --- | --- | --- |
+| `sus_path` readlink face | the readlink route plus a path lookup with the kernel's own semantics | 3.2 | works with the documented nuance, see below |
+| `sus_path` O_PATH face | `FMODE_PATH`, `file->f_path`, `d_backing_inode()` | 2.6.39 | no version-specific API, nothing to guard |
+| `hide_ksu_susfs_symbols` | the kernel's own `kallsyms_op` table | any kernel with `CONFIG_KALLSYMS_ALL=y` | face stays off and says why, see below |
+| `sus_map` (maps/smaps) | `proc_pid_maps_op`, `proc_pid_smaps_op`, optional `smaps_rollup` | probed per symbol | the affected face is not armed, the rest is |
+| `sus_kstat` | `vfs_getattr_nosec` route | 2.6.32 | kretprobe route needs `CONFIG_KRETPROBES`, branch-link route needs ARM64 |
+| mount hiding | `vfs_create_mount`, `clone_mnt`, `cleanup_mnt` | 2.6.x | not armed without the branch-link route |
+| `spoof_cmdline_or_bootconfig` | `saved_command_line` | 2.6.x | cmdline only on kernels without proc bootconfig |
+| `spoof_uname` | syscall hook | 2.6.x | needs the hook core |
+| `avc_log_spoofing` | `slow_avc_audit` | 2.6.x | needs `CONFIG_AUDIT=y`, the family is absent without it |
+| `sus_map_line_hides` counter | `atomic_t` only | any | always present |
+
+### The readlink face and the API that changed shape
+
+The readlink face answers `-ENOENT` for a path `sus_path` hides, so that the
+readlink answer cannot disagree with the stat family's. To do that it has to
+resolve the very object the kernel would resolve, which means the very lookup
+`do_readlinkat()` performs: `LOOKUP_EMPTY`, no final follow.
+
+That API is the one place where a version macro would have been wrong in both
+directions:
+
+- `user_path_at_empty()` was **added** in v3.2 (with `AT_EMPTY_PATH`) and
+  **retired** in v5.8, when upstream folded the empty-path handling into
+  `user_path_at()` (commit dff60734fc760, "vfs: retire user_path_at_empty and
+  drop empty arg from getname_flags").
+- `LOOKUP_EMPTY` came in with `AT_EMPTY_PATH` in v3.2 and is still defined in
+  current upstream.
+
+So the function exists on 3.2 - 5.7 and is gone on 5.8 and later. The tree
+therefore probes `include/linux/namei.h` instead of comparing version numbers,
+and `kernel/susfs/compat.h` selects the matching call:
+
+- `user_path_at_empty()` present (3.2 - 5.7): it is used, and the empty
+  pathname is told apart exactly.
+- only `user_path_at()` (5.8 and later): it is used with `LOOKUP_EMPTY`. The
+  empty pathname then resolves to the base directory instead of being
+  reported, but the kernel's own answer for the empty pathname is `-ENOENT`
+  there, so nothing is decided and nothing is hidden.
+- no `LOOKUP_EMPTY` at all: the lookup runs with flags 0, which resolves the
+  same object `readlink(2)` reports (no final follow), and a failed lookup
+  means "not hidden".
+
+The face additionally needs the readlink route to be installed. That route
+needs ARM64, `CONFIG_KSU_HACK_ARM64_BRANCH_LINK=y`, and a resolvable
+`do_readlinkat` symbol. When the family does not commit, the face reports
+itself as not armed and `sus_path_readlink` is absent from the
+enabled-features list - it is never armed on a kernel that cannot answer
+correctly.
+
+### The O_PATH face
+
+The O_PATH face uses `FMODE_PATH`, `file->f_path` and `d_backing_inode()`,
+all of which have been stable since 2.6.39, so it needs no version guard at
+all. It is armed through the branch-link `do_filp_open()` route, so on a
+kernel without branch-link it is compiled but never armed, and the
+enabled-features list does not mention it.
+
+### The kallsyms face
+
+The kallsyms face patches the `show` callback of the kernel's own
+`kallsyms_op` table, exactly the way the maps and smaps callbacks are
+patched. `kallsyms_op` is a **static** object in `kernel/kallsyms.c`, so it
+is only listed in `/proc/kallsyms` - and therefore only resolvable - when the
+kernel exports every symbol (`CONFIG_KALLSYMS_ALL=y`). That is a capability,
+not a version, so it is probed at runtime: when the symbol cannot be
+resolved the face stays off, the boot log says so, and the `ksu_`/`susfs_`
+symbols remain visible. Android's arm64 defconfig has
+`CONFIG_KALLSYMS_ALL=y`, so the face is live on the targets this branch
+cares about.
+
+The line format the matcher relies on (`"<addr> <type> <name>"`, with an
+optional `"\t[<module>]"` suffix) has not changed since 2.6, and the matcher
+works on the rendered text rather than on a mirror of the kernel's
+`struct kallsym_iter`, whose layout did change (upstream's own comment says
+so, `pos_arch_end` is gone in v6.5).
+
+## The SUSFS loadable module is gone
+
+Upstream's SUSFS ships as a loadable module, `susfs_guard_lkm.ko`, and the
+whole module is built on kprobes: it arms `register_kprobe()` and
+`register_kretprobe()` for its stat, mount, path and map faces, and it
+refuses to load at all when those imports cannot be resolved.
+
+This kernel disables kprobes on purpose - they cost too much on exactly the
+hot paths a probe-based implementation has to watch - so the module could
+never have been used here, and carrying it in the tree only invited the
+mistake of configuring it.
+
+The tree therefore has no module:
+
+- `kernel/susfs_lkm/` is deleted
+- the `CONFIG_KSU_SUSFS_LKM` option is gone
+- so is the `depends on !KSU_SUSFS_LKM` that made the two implementations
+  mutually exclusive, and the `$(error)` guard in `kernel/Kbuild` that
+  refused a hand-edited config with both
+
+The three behaviours the module was the only way to get are now part of the
+hookless implementation: the readlink face, the O_PATH face and the kallsyms
+symbol hiding. They use the interception the rest of the tree already uses -
+the syscall table and the ARM64 branch-link call-site rewrites - so
+`CONFIG_KPROBES` stays `n` and the module's probe machinery is not needed.
+
 ## Summary
 
 `susfs-hookless` keeps SUSFS inside `KernelSU-Next`, replaces the old broad
@@ -331,6 +451,9 @@ The hookless SUSFS runtime is tracked as 2.4.0.
 
 Upstream's SUSFS is a loadable module and this tree's is not, so the
 upstream sources are used as a specification rather than as a source of
-code. Features that need the module's own machinery - the readlink face
-gated by swapping the inode's `i_op`, the 64-entry mount keep list, the
-LKM control nodes - are not yet present here and are tracked separately.
+code. The module's probe-based implementation is gone from the tree as well
+(see "The SUSFS loadable module is gone" above): the readlink face, the
+O_PATH face and the kallsyms symbol hiding are now answered from the
+hookless interception layer instead of from a module's kprobes. The
+64-entry mount keep list and the LKM control nodes still are not present
+here and are tracked separately.

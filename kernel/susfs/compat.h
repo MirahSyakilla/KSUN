@@ -5,7 +5,9 @@
 #include <linux/hugetlb.h>
 #include <linux/jump_label.h>
 #include <linux/mm.h>
+#include <linux/namei.h>
 #include <linux/pagemap.h>
+#include <linux/path.h>
 #include <linux/ptrace.h>
 #include <linux/radix-tree.h>
 #include <linux/rwsem.h>
@@ -13,6 +15,7 @@
 #include <linux/slab.h>
 #include <linux/swap.h>
 #include <linux/swapops.h>
+#include <linux/uaccess.h>
 
 #if defined(KSU_SUSFS_HAS_XA_IS_VALUE) || defined(KSU_SUSFS_HAS_XA_LOAD)
 #include <linux/xarray.h>
@@ -300,6 +303,67 @@ static inline void *ksu_susfs_find_shmem_swap_entry(
 #else
 	*needs_put = true;
 	return find_get_page(mapping, index);
+#endif
+}
+
+/*
+ * ---- the readlink face's path lookup ----
+ *
+ * do_readlinkat() resolves the caller's pathname with LOOKUP_EMPTY and
+ * without a final follow, and on the kernels that still carry the out
+ * parameter it also tells the caller whether the pathname was the empty
+ * string.  The face has to resolve the very same object, otherwise the
+ * readlink answer and the stat family's answer could disagree.
+ *
+ * The API that does this changed shape in v5.8: upstream retired
+ * user_path_at_empty() and folded the empty-path handling into
+ * user_path_at() (commit dff60734fc760, "vfs: retire user_path_at_empty and
+ * drop empty arg from getname_flags").  The function therefore exists on
+ * every kernel this branch supports - it was added in v3.2 - EXCEPT on v5.8
+ * and later, where the opposite holds.  A version macro would therefore get
+ * both ends of the range wrong, so the shape is selected from the source
+ * tree instead (kernel/Kbuild probes include/linux/namei.h):
+ *
+ *   - user_path_at_empty() present (v3.2 .. v5.7): use it.  The empty
+ *     pathname is told apart exactly, and the face answers exactly as the
+ *     stat family does.
+ *   - user_path_at() only, LOOKUP_EMPTY present (v5.8 ..): use
+ *     user_path_at() with LOOKUP_EMPTY.  The empty pathname then resolves to
+ *     the base directory instead of being reported, but the kernel's own
+ *     answer for the empty pathname is -ENOENT there, so there is nothing
+ *     to decide and nothing to hide.
+ *   - no LOOKUP_EMPTY at all: resolve with flags 0, which is the same
+ *     object readlink(2) reports (no final follow), and treat a failed
+ *     lookup as "not hidden".
+ *
+ * The helper lives in this shared header because the readlink route is
+ * shared: NoMount's lookup scope and sus_path's readlink face both answer
+ * from the same interception point, and a symbol that both of them need must
+ * not live inside one feature's #ifdef.
+ */
+static inline int ksu_susfs_readlink_lookup(int dfd,
+					    const char __user *pathname,
+					    struct path *path, bool *empty)
+{
+	int err;
+
+	*empty = false;
+
+#ifdef KSU_SUSFS_HAS_USER_PATH_AT_EMPTY
+	{
+		int empty_flag = 0;
+
+		err = user_path_at_empty(dfd, pathname, LOOKUP_EMPTY, path,
+					  &empty_flag);
+		*empty = empty_flag != 0;
+		return err;
+	}
+#elif defined(KSU_SUSFS_HAS_LOOKUP_EMPTY)
+	err = user_path_at(dfd, pathname, LOOKUP_EMPTY, path);
+	return err;
+#else
+	err = user_path_at(dfd, pathname, 0, path);
+	return err;
 #endif
 }
 

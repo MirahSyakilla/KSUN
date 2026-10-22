@@ -72,12 +72,19 @@ static void stop_execve_hook();
 
 #ifdef CONFIG_KSU_HOOK_CORE
 static struct work_struct stop_input_hook_work;
-static bool ksu_input_hook __read_mostly = true;
 static bool ksu_input_handler_registered;
 #else
 bool ksu_init_rc_hook __read_mostly = true;
 bool ksud_execve_key __read_mostly = true;
 #endif
+/* The "the input hook is still armed" flag.  It is read by the input event
+ * handler and by the runtime teardown, and both of those exist in every
+ * profile: the hook-core profile drives them from the KSU input handler, the
+ * manual-hook profile from the kernel's own input hook.  Keeping the flag
+ * outside the profile guard is what makes both profiles compile - it used to
+ * live inside the hook-core guard while the manual profile's teardown
+ * referenced it. */
+static bool ksu_input_hook __read_mostly = true;
 
 static const char __user *get_user_arg_ptr(struct user_arg_ptr argv, int nr)
 {

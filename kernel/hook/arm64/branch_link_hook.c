@@ -911,6 +911,94 @@ static bool ksu_bl_records_all_restored(void)
 	return true;
 }
 
+/*
+ * AVC audit-log family (hookless migration of the slow_avc_audit kprobe).
+ *
+ * The old implementation was a symbol-scoped kprobe pre-handler on
+ * slow_avc_audit() that rewrote the tsid ARGUMENT in the saved registers
+ * before the original body ran: if the audited target SID belonged to a KSU
+ * root domain, it was replaced with a priv_app SID, so the emitted audit
+ * record showed a priv_app tcontext instead of the root domain.  The original
+ * body always ran afterwards, and enforcement decisions are unaffected --
+ * slow_avc_audit() only formats/emits audit output (it is called from
+ * avc_has_perm*() after the permission decision).
+ *
+ * The hookless equivalent is a call-site wrapper with the same ABI as
+ * slow_avc_audit(): munge the tsid argument, call the original, return its
+ * result.  That reproduces the pre-handler semantics exactly (argument
+ * mutation before body execution) without any probe machinery.
+ *
+ * Requires CONFIG_AUDIT=y: with CONFIG_AUDIT=n the symbol does not exist and
+ * there is no audit output to spoof -- the family is absent by design.
+ *
+ * Outside the NoMount guard on purpose: AVC spoofing belongs to the SELinux
+ * hygiene feature, not to NoMount, and the family is installed whenever the
+ * hook core and the audit subsystem are both present.  Keeping it inside the
+ * NoMount guard would make the call in ksu_branch_link_patch_init() refer to
+ * a function that does not exist in a SUSFS-without-NoMount build.
+ */
+#if defined(CONFIG_KSU_HOOK_CORE) && defined(CONFIG_AUDIT)
+static int (*slow_avc_audit_fn)(void *, u32, u32, u16, u32, u32, u32, int,
+				void *);
+
+static int __nocfi ksu_do_slow_avc_audit(void *state, u32 ssid, u32 tsid,
+					 u16 tclass, u32 requested,
+					 u32 audited, u32 denied, int result,
+					 void *a)
+{
+	int (*orig)(void *, u32, u32, u16, u32, u32, u32, int, void *);
+	int ret;
+
+	orig = READ_ONCE(slow_avc_audit_fn);
+	if (unlikely(!orig))
+		return -EOPNOTSUPP;
+	if (ksu_avc_spoof_active())
+		tsid = ksu_avc_spoof_tsid(tsid);
+	ret = orig(state, ssid, tsid, tclass, requested, audited, denied,
+		   result, a);
+	return ret;
+}
+
+static bool ksu_branch_link_patch_avc_family(void)
+{
+	static const struct ksu_bl_manifest_caller callers[] = {
+		/* Every compiled call site of slow_avc_audit in the
+		 * AUDIT=y lisa image; the old kprobe was symbol-scoped
+		 * and fired on all of them, so all are REQUIRED. */
+		{ "avc_has_extended_perms", KSU_BL_SITE_REQUIRED, 1 },
+		{ "avc_has_perm", KSU_BL_SITE_REQUIRED, 1 },
+		{ "avc_has_perm_flags", KSU_BL_SITE_REQUIRED, 1 },
+		{ "selinux_capable", KSU_BL_SITE_REQUIRED, 1 },
+		{ "selinux_file_ioctl", KSU_BL_SITE_REQUIRED, 1 },
+		{ "audit_inode_permission", KSU_BL_SITE_REQUIRED, 1 },
+		{ "has_cap_mac_admin", KSU_BL_SITE_REQUIRED, 1 },
+	};
+	unsigned long target = ksu_bl_lookup("slow_avc_audit");
+	unsigned int found = 0;
+	unsigned int patched = 0;
+	bool ready;
+	int count;
+
+	WRITE_ONCE(slow_avc_audit_fn,
+		   (void *)ksu_bl_lookup_canonical("slow_avc_audit"));
+	count = ksu_bl_record_patch_manifest(
+		"avc/slow_avc_audit", callers, ARRAY_SIZE(callers), target,
+		(unsigned long)ksu_do_slow_avc_audit, &found, &patched);
+	pr_info("branch_link: avc profile=%s family=%u/%u sites=%d\n",
+		"lisa-5.4-audit", patched, found, count);
+	ready = target && count > 0 && found == patched;
+	if (!ready) {
+		if (ksu_bl_records_all_restored())
+			WRITE_ONCE(slow_avc_audit_fn, NULL);
+		else
+			pr_warn("branch_link: avc family failed with "
+				"unrestorable sites; wrapper stays bound to "
+				"original\n");
+	}
+	return ready;
+}
+#endif /* CONFIG_KSU_HOOK_CORE && CONFIG_AUDIT */
+
 #ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 /*
  * Permission family: replaces the inode_permission/generic_permission
@@ -1196,86 +1284,6 @@ static bool ksu_branch_link_patch_dpath_family(void)
 static void ksu_branch_link_dpath_retire_probe(void)
 {
 	ksu_nomount_dpath_kretprobe_retire();
-}
-
-/*
- * AVC audit-log family (hookless migration of the slow_avc_audit kprobe).
- *
- * The old implementation was a symbol-scoped kprobe pre-handler on
- * slow_avc_audit() that rewrote the tsid ARGUMENT in the saved registers
- * before the original body ran: if the audited target SID belonged to a KSU
- * root domain, it was replaced with a priv_app SID, so the emitted audit
- * record showed a priv_app tcontext instead of the root domain.  The original
- * body always ran afterwards, and enforcement decisions are unaffected --
- * slow_avc_audit() only formats/emits audit output (it is called from
- * avc_has_perm*() after the permission decision).
- *
- * The hookless equivalent is a call-site wrapper with the same ABI as
- * slow_avc_audit(): munge the tsid argument, call the original, return its
- * result.  That reproduces the pre-handler semantics exactly (argument
- * mutation before body execution) without any probe machinery.
- *
- * Requires CONFIG_AUDIT=y: with CONFIG_AUDIT=n the symbol does not exist and
- * there is no audit output to spoof -- the family is absent by design.
- */
-static int (*slow_avc_audit_fn)(void *, u32, u32, u16, u32, u32, u32, int,
-				void *);
-
-static int __nocfi ksu_do_slow_avc_audit(void *state, u32 ssid, u32 tsid,
-					 u16 tclass, u32 requested,
-					 u32 audited, u32 denied, int result,
-					 void *a)
-{
-	int (*orig)(void *, u32, u32, u16, u32, u32, u32, int, void *);
-	int ret;
-
-	orig = READ_ONCE(slow_avc_audit_fn);
-	if (unlikely(!orig))
-		return -EOPNOTSUPP;
-	if (ksu_avc_spoof_active())
-		tsid = ksu_avc_spoof_tsid(tsid);
-	ret = orig(state, ssid, tsid, tclass, requested, audited, denied,
-		   result, a);
-	return ret;
-}
-
-static bool ksu_branch_link_patch_avc_family(void)
-{
-	static const struct ksu_bl_manifest_caller callers[] = {
-		/* Every compiled call site of slow_avc_audit in the
-		 * AUDIT=y lisa image; the old kprobe was symbol-scoped
-		 * and fired on all of them, so all are REQUIRED. */
-		{ "avc_has_extended_perms", KSU_BL_SITE_REQUIRED, 1 },
-		{ "avc_has_perm", KSU_BL_SITE_REQUIRED, 1 },
-		{ "avc_has_perm_flags", KSU_BL_SITE_REQUIRED, 1 },
-		{ "selinux_capable", KSU_BL_SITE_REQUIRED, 1 },
-		{ "selinux_file_ioctl", KSU_BL_SITE_REQUIRED, 1 },
-		{ "audit_inode_permission", KSU_BL_SITE_REQUIRED, 1 },
-		{ "has_cap_mac_admin", KSU_BL_SITE_REQUIRED, 1 },
-	};
-	unsigned long target = ksu_bl_lookup("slow_avc_audit");
-	unsigned int found = 0;
-	unsigned int patched = 0;
-	bool ready;
-	int count;
-
-	WRITE_ONCE(slow_avc_audit_fn,
-		   (void *)ksu_bl_lookup_canonical("slow_avc_audit"));
-	count = ksu_bl_record_patch_manifest(
-		"avc/slow_avc_audit", callers, ARRAY_SIZE(callers), target,
-		(unsigned long)ksu_do_slow_avc_audit, &found, &patched);
-	pr_info("branch_link: avc profile=%s family=%u/%u sites=%d\n",
-		"lisa-5.4-audit", patched, found, count);
-	ready = target && count > 0 && found == patched;
-	if (!ready) {
-		if (ksu_bl_records_all_restored())
-			WRITE_ONCE(slow_avc_audit_fn, NULL);
-		else
-			pr_warn("branch_link: avc family failed with "
-				"unrestorable sites; wrapper stays bound to "
-				"original\n");
-	}
-	return ready;
 }
 
 /*
@@ -3472,11 +3480,17 @@ int ksu_branch_link_patch_init(void)
 		goto install_failed;
 
 	ksu_bl_exec_ready = exec_ready;
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
+	/* The mount and mount-namespace families are SUSFS features: their
+	 * probe-based fallbacks live in the SUSFS tree and only exist when
+	 * that tree is compiled in.  The calls therefore belong inside the
+	 * SUSFS guard, next to the families they retire. */
 	if (ksu_bl_mount_ready) {
 		ksu_susfs_disable_mount_probe_fallback();
 	}
 	if (ksu_susfs_mntns_get_runtime_ready())
 		ksu_susfs_disable_mntns_probe_fallback();
+#endif
 	pr_info("branch_link: readiness faccess=%d readlink=%d permission=%d "
 		"dpath=%d avc=%d gname-flags=%d gname-kernel=%d iterate=%d "
 		"stat-path=%d stat-fd=%d statfs=%d exec=%d mount=%d "

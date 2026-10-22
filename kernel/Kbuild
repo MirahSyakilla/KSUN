@@ -130,12 +130,6 @@ kernelsu-objs += feature/adb_root.o
 
 kernelsu-objs += feature/selinux_hide.o
 
-ifeq ($(CONFIG_KSU_SUSFS_LKM),y)
-ifeq ($(CONFIG_KSU_HOOKLESS_SUSFS),y)
-$(error CONFIG_KSU_HOOKLESS_SUSFS and CONFIG_KSU_SUSFS_LKM are mutually exclusive: the in-tree hookless SUSFS (kernel/susfs/) and the standalone SUSFS module (kernel/susfs_lkm/, susfs_guard_lkm.ko) implement the same feature on the same hooks, so only one of them may be live. Pick one in the Kconfig menu.)
-endif
-endif
-
 ifeq ($(CONFIG_KSU_HOOKLESS_SUSFS),y)
 kernelsu-objs += susfs/core.o
 kernelsu-objs += susfs/kstat.o
@@ -295,6 +289,29 @@ ifeq ($(shell grep -Eq '[*]iterate[^_[:alnum:]]' \
 	$(srctree)/include/linux/fs.h 2>/dev/null; echo $$?),0)
 ccflags-y += -DKSU_SUSFS_HAS_ITERATE
 endif
+# The readlink face resolves the caller's pathname the way do_readlinkat()
+# does.  Upstream retired user_path_at_empty() in v5.8 (commit
+# dff60734fc760, "vfs: retire user_path_at_empty and drop empty arg from
+# getname_flags") and folded the empty-path handling into user_path_at();
+# before that the function existed since v3.2.  The shape is therefore
+# selected from the source tree, not from LINUX_VERSION_CODE: a vendor tree
+# that backported the retirement (or did not) must get the matching call.
+ifeq ($(shell grep -q "user_path_at_empty" \
+	$(srctree)/include/linux/namei.h 2>/dev/null; echo $$?),0)
+ccflags-y += -DKSU_SUSFS_HAS_USER_PATH_AT_EMPTY
+endif
+ifeq ($(shell grep -q "define LOOKUP_EMPTY" \
+	$(srctree)/include/linux/namei.h 2>/dev/null; echo $$?),0)
+ccflags-y += -DKSU_SUSFS_HAS_LOOKUP_EMPTY
+endif
+# The kallsyms face patches the show callback of the kernel's own
+# kallsyms seq_operations table.  That table is a *static* object, so it is
+# only listed in /proc/kallsyms - and therefore only resolvable - when the
+# kernel exports every symbol.  Without it the face cannot be armed at all
+# and says so instead of pretending to hide something.
+ifeq ($(CONFIG_KALLSYMS_ALL),y)
+ccflags-y += -DKSU_SUSFS_HAS_KALLSYMS_ALL
+endif
 endif
 
 ifeq ($(CONFIG_KSU_HOOKLESS_NOMOUNT),y)
@@ -353,7 +370,17 @@ endif
 
 # The runner is swapped in through the execve hook, so it needs the hook
 # core. Without it the whole feature is compiled out (KSU_NO_PREINIT).
+#
+# It also needs a kernel that can hand out an unlinked in-memory file:
+# shmem_file_setup() lives in mm/shmem.c, which is only built when the
+# kernel carries the shmem filesystem (CONFIG_SHMEM).  A kernel without it
+# cannot stage the runner at all, so the feature is compiled out there too
+# rather than failing to build.
+KSU_HAS_SHMEM_FILE_SETUP := $(if $(CONFIG_SHMEM),$(shell grep -q \
+	"shmem_file_setup" $(srctree)/include/linux/shmem_fs.h 2>/dev/null && \
+	echo 1),)
 ifeq ($(CONFIG_KSU_HOOK_CORE),y)
+ifeq ($(KSU_HAS_SHMEM_FILE_SETUP),1)
 kernelsu-objs += preinit/preinit.o
 kernelsu-objs += preinit/blob.o
 
@@ -379,6 +406,10 @@ $(obj)/preinit/runner.elf: $(KSU_KERNEL_DIR)/preinit/runner/runner.c \
 targets += preinit/runner.elf
 $(obj)/preinit/blob.o: $(obj)/preinit/runner.elf
 asflags-y += -DKSU_PREINIT_RUNNER_BIN=\"$(obj)/preinit/runner.elf\"
+else
+$(warning -- KernelSU: preinit needs shmem_file_setup() (CONFIG_SHMEM), preinit disabled)
+ccflags-y += -DKSU_NO_PREINIT
+endif
 else
 $(warning -- KernelSU: preinit needs CONFIG_KSU_HOOK_CORE, preinit disabled)
 ccflags-y += -DKSU_NO_PREINIT

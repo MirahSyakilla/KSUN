@@ -39,11 +39,17 @@ NoMount owns:
 The runtime redirects the two native filename constructors, so every new
 pathname lookup evaluates current policy before the global dcache is used.
 `iterate_dir` is redirected to filter replaced names and emit injected names.
-Kretprobes provide the permission, `d_path`, `vfs_getattr_nosec`, and `statfs`
-behavior used by upstream NoMount.  On ARM64, branch-link syscall wrappers
-also finish `stat*`, `fstat*`, and `statfs*` results when vendor LTO inlines
-the VFS helper and bypasses its return probe.  SUSFS's proc-maps runtime
-provides the remaining mapped-file inode/device metadata view.
+The permission, `d_path`, `vfs_getattr_nosec`, and `statfs` behavior used by
+upstream NoMount is provided by the same branch-link call-site rewrites, so
+the runtime does not need the kretprobes upstream uses for it.  The kretprobe
+route is still compiled in for kernels that have `CONFIG_KRETPROBES`, and it
+is the fallback that keeps working when a branch-link family does not
+install completely; on a kernel without kretprobes the branch-link route is
+the only one, and the runtime stays fail-closed when it cannot commit.  On
+ARM64, branch-link syscall wrappers also finish `stat*`, `fstat*`, and
+`statfs*` results when vendor LTO inlines the VFS helper and bypasses its
+return probe.  SUSFS's proc-maps runtime provides the remaining mapped-file
+inode/device metadata view.
 
 The implementation deliberately does **not** create a front inode, insert a
 synthetic inode into a real filesystem's inode hash, replace a file's mapping,
@@ -141,6 +147,58 @@ the commands this kernel does not implement (`CLEAR_RULES`, `CLEAR_UIDS`,
 `GET_LIST` pages through the rule table: the kernel returns as many records
 as fit into the payload buffer and stores the continuation token in `arg1`,
 which the client sends back with the next command.
+
+## Kernel version support
+
+NoMount's interception is the same on every kernel this tree targets: the
+runtime redirects the native filename constructors and patches the compiled
+call sites of the functions it needs. What differs between kernels is which
+of those call sites exist, and that is discovered at runtime rather than
+assumed at compile time - a family that cannot be installed completely rolls
+itself back and the runtime keeps the stock behaviour.
+
+The transport is the part with the smallest API surface, and it is the one
+that has to exist on every kernel:
+
+| What it uses | Kernel API | Minimum | On older kernels |
+| --- | --- | --- | --- |
+| key type registration | `register_key_type()`, `unregister_key_type()` | 2.6.x | none, both have been there since the keyring was introduced |
+| the key type's own ops | `preparse`, `free_preparse`, `instantiate` | 2.6.36 | none, all three are original `struct key_type` members |
+| the parsed payload | `struct key_preparsed_payload`'s `data`/`datalen` | 2.6.36 | none, the fields are direct members, not behind a version-specific accessor |
+| the permission check | `capable(CAP_SYS_ADMIN)` | 2.6.x | none, and it resolves against the initial user namespace on every kernel |
+| the payload copy | `get_unaligned()`/`put_unaligned()` | 2.6.x | none, only the include moved (`asm/unaligned.h` became `linux/unaligned.h` in 6.12) |
+
+The interception side needs more from the kernel, and the tree asks for it by
+name at runtime instead of by version: `getname_flags`, `getname_kernel`,
+`iterate_dir`, `inode_permission`, `generic_permission`, `d_path`,
+`vfs_getattr_nosec` and `vfs_statfs` all have to be resolvable symbols, and
+the ARM64 branch-link route additionally has to find every call site of the
+function it replaces. A kernel where one of them is missing, or whose call
+sites do not match the manifest, gets the stock behaviour and a boot log
+that says which family did not commit - never a half-installed redirect.
+
+`CONFIG_KSU_HOOKLESS_NOMOUNT` depends on `CONFIG_KSU_HOOKLESS_SUSFS` because
+the two share one rule engine: NoMount asks SUSFS whether a path is hidden
+before it applies its own policy. A configuration that asks for NoMount
+without SUSFS is therefore not a configuration Kconfig can produce; the
+dependency is enforced there rather than in the code.
+
+## The SUSFS loadable module is gone
+
+Upstream's SUSFS ships as a loadable module, `susfs_guard_lkm.ko`, and every
+one of its interception mechanisms is a kprobe or a kretprobe. This kernel
+disables kprobes on purpose - they cost too much on the hot paths a
+probe-based implementation has to watch - so the module could never have been
+used here.
+
+The tree therefore carries no module at all: `kernel/susfs_lkm/` is deleted,
+the `CONFIG_KSU_SUSFS_LKM` option is gone with it, and so are the mutual
+exclusion it had with `CONFIG_KSU_HOOKLESS_SUSFS` and the build-time guard
+that refused a config with both. The behaviours the module provided are
+either answered by the hookless SUSFS implementation (the readlink face, the
+O_PATH face, the kallsyms symbol hiding) or, where they need the module's own
+machinery, simply not present. Nothing in this tree depends on
+`CONFIG_KPROBES`.
 
 ## Compatibility limits
 

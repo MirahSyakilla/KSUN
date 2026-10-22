@@ -30,6 +30,20 @@
 
 #include "sulog/event.h"
 
+/*
+ * The reboot supercall's kprobe route is the legacy fallback for kernels
+ * whose syscall table cannot be tampered with.  It needs a kernel that
+ * actually HAS kprobes: this tree builds with CONFIG_KPROBES=n on purpose
+ * (kprobes cost too much on the hot paths), so the route is compiled out
+ * there instead of failing to build.  The guard therefore asks for the
+ * kernel's kprobe support, not only for the absence of the tamper route.
+ */
+#if defined(CONFIG_KSU_HOOK_CORE) && \
+	!defined(CONFIG_KSU_TAMPER_SYSCALL_TABLE) && \
+	defined(CONFIG_KPROBES)
+#define KSU_REBOOT_KPROBE
+#endif
+
 uint32_t ksuver_override = 0;
 
 #ifdef CONFIG_KSU_HOOK_CORE
@@ -383,8 +397,7 @@ int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd,
 	return 0;
 }
 
-#if defined(CONFIG_KSU_HOOK_CORE) && \
-	!defined(CONFIG_KSU_TAMPER_SYSCALL_TABLE)
+#if defined(KSU_REBOOT_KPROBE)
 static int reboot_handler_pre(struct kprobe *p, struct pt_regs *regs)
 {
 	struct pt_regs *real_regs = PT_REAL_REGS(regs);
@@ -559,8 +572,7 @@ void __init ksu_supercalls_init(void)
 {
     ksu_supercall_dump_commands();
 
-#if defined(CONFIG_KSU_HOOK_CORE) && \
-	!defined(CONFIG_KSU_TAMPER_SYSCALL_TABLE)
+#ifdef KSU_REBOOT_KPROBE
     int rc;
 
     rc = register_kprobe(&reboot_kp);
@@ -574,8 +586,7 @@ void __init ksu_supercalls_init(void)
 
 void __exit ksu_supercalls_exit(void)
 {
-#if defined(CONFIG_KSU_HOOK_CORE) && \
-	!defined(CONFIG_KSU_TAMPER_SYSCALL_TABLE)
+#ifdef KSU_REBOOT_KPROBE
     unregister_kprobe(&reboot_kp);
 #endif
     ksu_supercall_cleanup_state();
