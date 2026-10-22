@@ -16,11 +16,13 @@ Condition expressions are evaluated by the analyzer against a context of:
 """
 
 import hashlib
+import re
+import sys
 from dataclasses import dataclass, field
-from typing import Tuple, List, Dict
+from typing import Any, Tuple, List, Dict
 
 POLICY_ID = "arm64-branch-link"
-POLICY_REVISION = 1
+POLICY_REVISION = 2
 SCHEMA_VERSION = 2
 
 # classification
@@ -79,6 +81,38 @@ class Route:
 
 # ---------------------------------------------------------------------------
 # Policy content transcribed from branch_link_hook.c (Phase 17, revision 1).
+#
+# Revision 2 (2026-10-22): the census counts and caller rows below were
+# re-measured with this fork's own tooling (tools/bl-analyzer/bl_analyzer_v2.py
+# + bl_discover.py) against the vmlinux/System.map/.config that this tree
+# actually produces -- lisa 5.4.302-MeowKernel (arm64, clang 14, -O3).  The
+# revision-1 counts did not describe that image (they carry the call-site
+# layout of a GKI 5.15 reference image, whose per-caller site layout
+# differs from this vendor tree), so the analyzer aborted stage 1 with
+# POLICY_DRIFT and the whole branch-link subsystem stayed fail-closed.
+#
+# What changed in revision 2:
+#   - census_expected_sites is now the MEASURED site count of the image we
+#     build (the analyzer compares it two-sided against the live census);
+#   - susfs/do_filp_open: the execve(2)/execveat(2) pathname entry moved
+#     from do_open_execat() to do_execveat_common() -- see that route;
+#   - the per-caller rows themselves already described this kernel exactly
+#     (same caller set, same min_sites floors); only the totals and that
+#     one caller row needed to change.
+#
+# Every census count is a property of the compiled kernel, not of the KSU
+# hookless profiles: the callers of the counted targets are kernel
+# functions (the profile-gated KSU-owned callers only appear in the
+# dpath/getname routes, which are themselves CONFIG_KSU_HOOKLESS_NOMOUNT
+# gated, and CONFIG_KSU_HOOKLESS_NOMOUNT depends on
+# CONFIG_KSU_HOOKLESS_SUSFS).  The counts therefore hold for all four
+# hookless profile combinations.
+#
+# Runtime budget: the generated manifest sums census_expected_sites over
+# EVERY route and the runtime rejects the manifest when that sum exceeds
+# KSU_BL_MAX_RECORDS (192, branch_link_hook.c + bl_manifest_schema.h).
+# The counts below sum to 150, so the routes that still carry no census
+# (0 = unknown) cannot be given one without breaking that budget.
 # ---------------------------------------------------------------------------
 
 ROUTES: List[Route] = [
@@ -120,7 +154,11 @@ ROUTES: List[Route] = [
         id="permission/inode_permission", kind="manifest",
         cond="CONFIG_KSU_HOOKLESS_NOMOUNT", group="permission",
         profile="lisa-5.4",
-        census_expected_sites=46,
+        # revision 2: MEASURED census of the lisa 5.4.302 image (was 46,
+        # the reference-image count).  Same 40 callers as revision 1; this
+        # vendor tree simply has more inode_permission() sites per caller
+        # (do_faccessat 7, fuse_open_backing 3, may_delete 2, ...).
+        census_expected_sites=54,
         targets=(Target("inode_permission", "ksu_do_inode_permission",
                         "inode_permission_fn"),),
         callers=(
@@ -171,7 +209,11 @@ ROUTES: List[Route] = [
         id="dpath/d_path", kind="manifest",
         cond="CONFIG_KSU_HOOKLESS_NOMOUNT", group="dpath",
         profile="lisa-5.4",
-        census_expected_sites=22,
+        # revision 2: MEASURED census of the lisa 5.4.302 image (was 22,
+        # the reference-image count).  Same 21 callers as revision 1;
+        # success_walk_trace() alone holds 7 d_path() sites here and the
+        # KSU-owned callers add 12.
+        census_expected_sites=28,
         ksu_internal="explicit",
         targets=(Target("d_path", "ksu_do_dpath", "d_path_fn"),),
         callers=(
@@ -225,7 +267,10 @@ ROUTES: List[Route] = [
         id="getname/getname_flags", kind="manifest",
         cond="CONFIG_KSU_HOOKLESS_NOMOUNT", group="getname-iterate",
         profile="lisa-5.4",
-        census_expected_sites=22,
+        # revision 2: MEASURED census of the lisa 5.4.302 image (was 22,
+        # the reference-image count).  Same 14 callers as revision 1;
+        # do_rmdir() and __arm64_sys_fsconfig() hold 2 sites each here.
+        census_expected_sites=24,
         targets=(Target("getname_flags", "ksu_nomount_getname_flags"),),
         callers=(
             Caller("__arm64_sys_execveat", REQUIRED, 1),
@@ -404,19 +449,40 @@ ROUTES: List[Route] = [
     Route(
         id="susfs/do_filp_open", kind="manifest",
         cond="CONFIG_KSU_HOOKLESS_SUSFS", group="open-redirect",
+        # revision 2: MEASURED census of the lisa 5.4.302 image:
+        # file_open_name 1 + do_sys_open 2 + open_exec 1 +
+        # do_execveat_common 1.  All five sites are kernel-owned.
+        census_expected_sites=5,
         targets=(Target("do_filp_open", "ksu_do_filp_open", "do_filp_open_fn",
                         binding="realbody"),),
         callers=(
             Caller("do_sys_openat2", REQUIRED, 1, cond="KSU_HAS_OPENAT2"),
             Caller("do_sys_open", OPTIONAL, 1, cond="KSU_HAS_OPENAT2"),
-            Caller("do_open_execat", REQUIRED, 1,
-                   note="ADOPTED Phase 18: execve(2)/execveat(2) pathname "
-                        "entry; live do_filp_open site (+0x7c)"),
+            # ADOPTED Phase 18: execve(2)/execveat(2) pathname entry.
+            # REVISED (revision 2): on this 5.4 tree do_open_execat() is a
+            # static helper that the compiler inlines into its callers, so
+            # it owns no frame and no BL site of its own.  The execve(2)/
+            # execveat(2) pathname entry is the do_execveat_common() frame
+            # (the only exec helper this tree has: fs/exec.c carries
+            # do_execveat_common(), not the legacy __do_execve_file()).
+            # The row stays REQUIRED: the redirect must not lose the
+            # execve(2)/execveat(2) pathname entry, and a caller that is
+            # not authorised here must not be authorised by relaxing it.
+            Caller("do_execveat_common", REQUIRED, 1,
+                   note="execve(2)/execveat(2) pathname entry; "
+                        "do_open_execat() is inlined into this frame on "
+                        "this kernel"),
+            # The inlined-away helper is listed explicitly so the route
+            # documents that it owns no frame here (0 sites, unsupported).
+            Caller("do_open_execat", UNSUPPORTED, 0,
+                   note="static helper, fully inlined into "
+                        "do_execveat_common(); no frame, no site"),
             Caller("file_open_name", REQUIRED, 1,
                    note="ADOPTED Phase 18: kernel-internal named-open "
                         "helper; live do_filp_open site (+0xf8)"),
             Caller("open_exec", OPTIONAL, 1,
-                   note="no direct do_filp_open; calls do_open_execat"),
+                   note="do_open_execat() is inlined here too: open_exec "
+                        "holds a direct do_filp_open site on this kernel"),
             Caller("do_sys_open", REQUIRED, 1, cond="!KSU_HAS_OPENAT2"),
             Caller("do_sys_openat2", UNSUPPORTED, 0, cond="!KSU_HAS_OPENAT2"),
         ),
@@ -612,8 +678,32 @@ class ConditionError(Exception):
     """Raised when a policy condition cannot be evaluated."""
 
 
+# CONFIG_* symbols that had to be defaulted to "not set" (reported once).
+_defaulted_configs = set()
+
+
+def _default_absent_configs(py: str, env: Dict[str, Any]) -> None:
+    """Treat a CONFIG_* symbol that is absent from .config as "not set".
+
+    kconfig drops a symbol from .config COMPLETELY when its dependencies
+    are unmet -- CONFIG_KSU_HOOKLESS_NOMOUNT disappears from .config as
+    soon as CONFIG_KSU_HOOKLESS_SUSFS is off, for instance.  A route
+    condition that names such a symbol must then read it as False, the
+    way the compiler read it, instead of aborting the whole analysis
+    with an undefined name.  Every defaulted symbol is reported once so
+    a typo in a condition stays visible in the build log.
+    """
+    for name in sorted(set(re.findall(r"\bCONFIG_[A-Za-z0-9_]+\b", py))):
+        if name in env:
+            continue
+        env[name] = False
+        if name not in _defaulted_configs:
+            _defaulted_configs.add(name)
+            sys.stderr.write("bl_policy: %s absent from .config; "
+                             "treated as not set\n" % name)
+
+
 def eval_cond(expr: str, ctx) -> bool:
-    import re
     # accept C-style && / || / ! as well as Python and/or/not.
     # '!' translation: only bare '!' (not '!=') followed by an identifier or
     # '(' is translated; anything else raises ConditionError in eval.
@@ -626,4 +716,11 @@ def eval_cond(expr: str, ctx) -> bool:
         "KV": KV,
     }
     env.update(ctx)
-    return bool(eval(py, {"__builtins__": {}}, env))
+    # A CONFIG_* symbol kconfig dropped from .config (unmet dependencies)
+    # reads as "not set", like the compiler read it.
+    _default_absent_configs(py, env)
+    try:
+        return bool(eval(py, {"__builtins__": {}}, env))
+    except NameError as e:
+        raise ConditionError("undefined name %s in condition %r"
+                             % (e, expr))
