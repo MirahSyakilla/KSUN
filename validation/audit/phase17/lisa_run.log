@@ -1,8 +1,0 @@
-bl_analyzer: WARN stat-fd: census callers without policy rows (acknowledged coverage gap): exportfs_get_name
-bl_analyzer: WARN susfs/do_filp_open: census callers without policy rows (acknowledged coverage gap): do_open_execat, file_open_name
-bl_analyzer: WARN execve: census callers without policy rows (acknowledged coverage gap): call_usermodehelper_exec_async, do_execve, do_execve_file, run_init_process
-bl_analyzer: WARN execveat: census callers without policy rows (acknowledged coverage gap): do_execve, do_execve_file
-bl_analyzer: WARN compat_execve: census callers without policy rows (acknowledged coverage gap): do_execve, do_execve_file
-bl_analyzer: WARN compat_execveat: census callers without policy rows (acknowledged coverage gap): do_execve, do_execve_file
-bl_analyzer: projected budget if acknowledged gaps adopted: 161/160 (capacity increase required)
-bl_analyzer: OK: 22 routes, 155 sites, payload aeab3fa86cf2f7d8
