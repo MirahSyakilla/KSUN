@@ -117,6 +117,8 @@ fun SettingScreen(navigator: DestinationsNavigator) {
     var suCompatStatus by rememberSaveable { mutableStateOf("") }
     var kernelUmountStatus by rememberSaveable { mutableStateOf("") }
     var adbRootStatus by rememberSaveable { mutableStateOf("") }
+    var shellSuAdbOnlyStatus by rememberSaveable { mutableStateOf("") }
+    var isShellSuAdbOnlyEnabled by rememberSaveable { mutableStateOf(false) }
     var selinuxHideStatus by rememberSaveable { mutableStateOf("") }
     var sulogStatus by rememberSaveable { mutableStateOf("") }
     var isSulogEnabled by rememberSaveable { mutableStateOf(false) }
@@ -128,6 +130,12 @@ fun SettingScreen(navigator: DestinationsNavigator) {
         sulogStatus = getFeatureStatus("sulog")
         isSulogEnabled = getFeaturePersistValue("sulog") == 1L
         adbRootStatus = getFeatureStatus("adb_root")
+        shellSuAdbOnlyStatus = getFeatureStatus("shell_su_adb_only")
+        isShellSuAdbOnlyEnabled = if (shellSuAdbOnlyStatus == "forced") {
+            getFeatureValue("shell_su_adb_only") == 1L
+        } else {
+            getFeaturePersistValue("shell_su_adb_only") == 1L
+        }
 
         selinuxHideStatus = getFeatureStatus("selinux_hide")
         avcSpoofStatus = getFeatureStatus("avc_spoof")
@@ -166,6 +174,9 @@ fun SettingScreen(navigator: DestinationsNavigator) {
                     isSulogEnabled = isSulogEnabled,
                     onSulogEnabledChange = { isSulogEnabled = it },
                     adbRootStatus = adbRootStatus,
+                    shellSuAdbOnlyStatusParam = shellSuAdbOnlyStatus,
+                    isShellSuAdbOnlyEnabled = isShellSuAdbOnlyEnabled,
+                    onShellSuAdbOnlyEnabledChange = { isShellSuAdbOnlyEnabled = it },
                     selinuxHideStatus = selinuxHideStatus,
                     avcSpoofStatus = avcSpoofStatus,
                     scope = scope
@@ -199,11 +210,15 @@ private fun KernelFeaturesCard(
     isSulogEnabled: Boolean,
     onSulogEnabledChange: (Boolean) -> Unit,
     adbRootStatus: String,
+    shellSuAdbOnlyStatusParam: String,
+    isShellSuAdbOnlyEnabled: Boolean,
+    onShellSuAdbOnlyEnabledChange: (Boolean) -> Unit,
     selinuxHideStatus: String,
     avcSpoofStatus: String,
     scope: kotlinx.coroutines.CoroutineScope
 ) {
     val context = LocalContext.current
+    val shellSuAdbOnlySupported = shellSuAdbOnlyStatusParam == "supported"
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -309,6 +324,27 @@ private fun KernelFeaturesCard(
                         com.topjohnwu.superuser.ShellUtils.fastCmd("setprop ctl.restart adbd")
                         isAdbRootEnabled = checked
                     }
+                }
+            }
+
+            val shellSuAdbOnlySummary = when (shellSuAdbOnlyStatusParam) {
+                "unsupported" -> stringResource(id = R.string.feature_status_unsupported_summary)
+                "managed" -> stringResource(id = R.string.feature_status_managed_summary)
+                "forced" -> stringResource(id = R.string.feature_status_forced_summary)
+                else -> stringResource(id = R.string.settings_shell_su_adb_only_summary)
+            }
+            SwitchItem(
+                icon = Icons.Filled.VerifiedUser,
+                title = stringResource(id = R.string.settings_shell_su_adb_only),
+                summary = shellSuAdbOnlySummary,
+                checked = isShellSuAdbOnlyEnabled,
+                enabled = shellSuAdbOnlySupported,
+                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)),
+                colors = ListItemDefaults.colors(containerColor = Color.Transparent)
+            ) { checked ->
+                if (execKsud("feature set shell_su_adb_only ${if (checked) 1 else 0}", true)) {
+                    execKsud("feature save", true)
+                    onShellSuAdbOnlyEnabledChange(checked)
                 }
             }
 

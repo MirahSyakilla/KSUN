@@ -19,6 +19,7 @@
 #define KSU_FILE_CONTEXT "u:object_r:" KERNEL_SU_FILE ":s0"
 #define ZYGOTE_CONTEXT "u:r:zygote:s0"
 #define INIT_CONTEXT "u:r:init:s0"
+#define ADBD_CONTEXT "u:r:adbd:s0"
 
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0)) && !defined(KSU_COMPAT_HAS_CURRENT_SID)
 /*
@@ -42,6 +43,13 @@ void cache_sid(void);
 
 bool is_task_ksu_domain(const struct cred *cred);
 
+/*
+ * Allocation-free variant of is_task_ksu_domain(): it only compares the
+ * cached SID and never falls back to the (allocating) string comparison,
+ * so it is safe to call while holding rcu_read_lock().
+ */
+bool is_task_ksu_domain_rcu(const struct cred *cred);
+
 bool is_ksu_domain();
 
 bool is_ksu_domain_fast(void);
@@ -49,6 +57,8 @@ bool is_ksu_domain_fast(void);
 bool is_zygote(const struct cred *cred);
 
 bool is_init(const struct cred *cred);
+
+bool is_adbd(const struct cred *cred);
 
 void apply_kernelsu_rules();
 

@@ -130,6 +130,8 @@ kernelsu-objs += feature/adb_root.o
 
 kernelsu-objs += feature/selinux_hide.o
 
+kernelsu-objs += feature/shell_su_adb_only.o
+
 ifeq ($(CONFIG_KSU_HOOKLESS_SUSFS),y)
 kernelsu-objs += susfs/core.o
 kernelsu-objs += susfs/kstat.o

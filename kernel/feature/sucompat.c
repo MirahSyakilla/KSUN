@@ -100,7 +100,9 @@ static __always_inline bool ksu_sucompat_current_allowed(void)
 	if (!uid)
 		return is_ksu_domain_fast() || unlikely(is_ksu_domain());
 
-	return __ksu_is_allow_uid(uid);
+	// ksu_is_allow_uid_for_current() and not the plain grant query: the
+	// shell_su_adb_only feature restricts shell on top of the allowlist.
+	return ksu_is_allow_uid_for_current(uid);
 }
 
 static const char su_path_cmp[KSU_SU_PATH_WORDS * sizeof(u64)]

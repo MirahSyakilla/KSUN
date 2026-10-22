@@ -23,6 +23,7 @@
 static u32 cached_su_sid __read_mostly = 0;
 static u32 cached_zygote_sid __read_mostly = 0;
 static u32 cached_init_sid __read_mostly = 0;
+static u32 cached_adbd_sid __read_mostly = 0;
 u32 ksu_file_sid __read_mostly = 0;
 
 static int transive_to_domain(const char *domain, struct cred *cred, bool clear_exec_sid)
@@ -162,6 +163,15 @@ void cache_sid(void)
         pr_info("Cached init SID: %u\n", cached_init_sid);
     }
 
+    err = security_secctx_to_secid(ADBD_CONTEXT, strlen(ADBD_CONTEXT),
+                                   &cached_adbd_sid);
+    if (err) {
+        pr_warn("Failed to cache adbd SID: %d\n", err);
+        cached_adbd_sid = 0;
+    } else {
+        pr_info("Cached adbd SID: %u\n", cached_adbd_sid);
+    }
+
     err = security_secctx_to_secid(KSU_FILE_CONTEXT, strlen(KSU_FILE_CONTEXT),
                                    &ksu_file_sid);
     if (err) {
@@ -207,9 +217,40 @@ static bool is_sid_match(const struct cred *cred, u32 cached_sid,
     return result;
 }
 
+/*
+ * Compare a task's SID against an already cached SID.
+ *
+ * is_sid_match() falls back to a string comparison when the SID has not been
+ * cached yet, and that fallback allocates. This helper never allocates, so it
+ * is safe to call while holding rcu_read_lock(); a context whose SID could not
+ * be cached simply does not match.
+ */
+static bool is_sid_match_cached(const struct cred *cred, u32 cached_sid)
+{
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0)
+	const struct task_security_struct *tsec;
+#else
+	const struct cred_security_struct *tsec;
+#endif
+
+	if (!cred || !cached_sid)
+		return false;
+
+	tsec = selinux_cred(cred);
+	if (!tsec)
+		return false;
+
+	return tsec->sid == cached_sid;
+}
+
 bool is_task_ksu_domain(const struct cred *cred)
 {
     return is_sid_match(cred, cached_su_sid, KERNEL_SU_CONTEXT);
+}
+
+bool is_task_ksu_domain_rcu(const struct cred *cred)
+{
+	return is_sid_match_cached(cred, cached_su_sid);
 }
 
 bool is_ksu_domain(void)
@@ -246,6 +287,11 @@ bool is_zygote(const struct cred *cred)
 bool is_init(const struct cred *cred)
 {
     return is_sid_match(cred, cached_init_sid, INIT_CONTEXT);
+}
+
+bool is_adbd(const struct cred *cred)
+{
+	return is_sid_match_cached(cred, cached_adbd_sid);
 }
 
 void escape_to_root_for_adb_root(void)

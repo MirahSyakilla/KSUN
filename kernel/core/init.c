@@ -27,6 +27,7 @@
 #include "selinux/selinux.h"
 #include "feature/adb_root.h"
 #include "feature/selinux_hide.h"
+#include "feature/shell_su_adb_only.h"
 #include "feature/sulog.h"
 #include "feature/suspect_uid.h"
 #include "infra/symbol_resolver.h"
@@ -165,6 +166,8 @@ int __init kernelsu_init(void)
 
 	ksu_selinux_hide_init();
 
+	ksu_shell_su_adb_only_init();
+
 	/*
 	 * Installed before SUSFS so the uid oracle is closed on both ABIs before
 	 * anything else starts answering questions on the app's behalf. A
@@ -268,6 +271,7 @@ void __exit kernelsu_exit(void)
 
 	ksu_allowlist_exit();
 
+	ksu_shell_su_adb_only_exit();
 	ksu_selinux_hide_exit();
 
 #ifdef CONFIG_KSU_HOOK_CORE
