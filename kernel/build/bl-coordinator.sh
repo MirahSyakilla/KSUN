@@ -124,8 +124,13 @@ mv "$TX/bl_manifest_ids.h" "$GEN_IDS"
 mv "$TX/bl_manifest_gen.c" "$GEN_SRC"
 
 
-# stage-1 payload digest (fixed-point reference)
-P1=""
+# stage-1 payload digest (fixed-point reference).  P1 was assigned from
+# the stage-1 manifest above; it MUST stay set, because stage 3 passes it
+# to the analyzer as --expect-payload.  Clearing it here turned the
+# fixed-point gate into a no-op (the analyzer skips the comparison when
+# the expected digest is empty) while still reporting "fixed point
+# verified" in the log.
+[ -n "$P1" ] || fail "stage-1 payload digest missing"
 
 # ---- stage 2: relink with the generated object --------------------------------
 log "stage 2: relinking vmlinux with generated manifest object"

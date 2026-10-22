@@ -22,8 +22,10 @@ from dataclasses import dataclass, field
 from typing import Any, Tuple, List, Dict
 
 POLICY_ID = "arm64-branch-link"
-POLICY_REVISION = 2
-SCHEMA_VERSION = 2
+POLICY_REVISION = 3
+# Schema of the generated manifest data object.  Must match
+# KSU_BL_MANIFEST_SCHEMA (bl_manifest_schema.h), which is 3.
+SCHEMA_VERSION = 3
 
 # classification
 REQUIRED = "required"
@@ -113,6 +115,34 @@ class Route:
 # KSU_BL_MAX_RECORDS (192, branch_link_hook.c + bl_manifest_schema.h).
 # The counts below sum to 150, so the routes that still carry no census
 # (0 = unknown) cannot be given one without breaking that budget.
+#
+# Revision 3 (2026-10-22): the per-caller scan widths are now derived
+# from THIS kernel's MEASURED site offsets instead of the reference
+# image's function sizes.  A width is the smallest scan window that
+# still covers the caller's deepest BL site to the route target
+# (max_site_offset + 4, rounded up to 32 bytes); it must stay below the
+# distance to the caller's next symbol, because the scanner stops there.
+# The runtime array copy (kernel/hook/arm64/branch_link_hook.c) carries
+# the same widths: the two copies are one contract and must agree.
+#
+# The measured widths on this image (lisa 5.4.302-MeowKernel, arm64,
+# clang 14 -O3; site offset -> next symbol -> width):
+#
+#   permission/inode_permission
+#     path_openat            +0x41c -> +0xd60 -> 0x420
+#     flush_old_exec         +0x500 -> +0x8c0 -> 0x520
+#     vfs_rename             +0x444 -> +0x470 -> 0x460
+#   iterate/iterate_dir
+#     ovl_iterate            +0x484 -> +0x6f0 -> 0x4a0
+#   susfs/unix_find_other
+#     unix_dgram_sendmsg     +0x65c -> +0xa60 -> 0x660
+#
+# Every other caller's deepest site sits inside the default
+# KSU_BL_SCAN_WIDTH (0x400) and therefore keeps width 0 (auto).  The
+# same measurement showed that the reference-image widths this policy
+# inherited (flush_old_exec 0x600, vfs_rename 0x470, ovl_iterate 0x600)
+# were needlessly wide on this kernel, so they were tightened to the
+# values above.
 # ---------------------------------------------------------------------------
 
 ROUTES: List[Route] = [
@@ -175,21 +205,21 @@ ROUTES: List[Route] = [
             Caller("__arm64_sys_fchdir", REQUIRED, 1),
             Caller("ksys_chroot", REQUIRED, 2),
             Caller("vfs_dedupe_file_range_one", REQUIRED, 1),
-            Caller("flush_old_exec", REQUIRED, 1, width=0x600),
+            Caller("flush_old_exec", REQUIRED, 1, width=0x520),
             Caller("would_dump", REQUIRED, 1),
             Caller("prepare_binprm", REQUIRED, 1),
             Caller("lookup_one_len_common", REQUIRED, 1),
             Caller("vfs_create", REQUIRED, 1),
             Caller("vfs_mkobj", REQUIRED, 1),
             Caller("vfs_tmpfile", REQUIRED, 1),
-            Caller("path_openat", REQUIRED, 1),
+            Caller("path_openat", REQUIRED, 1, width=0x420),
             Caller("vfs_mknod", REQUIRED, 1),
             Caller("vfs_mkdir", REQUIRED, 1),
             Caller("may_delete", REQUIRED, 1),
             Caller("vfs_symlink", REQUIRED, 1),
             Caller("vfs_link", REQUIRED, 1),
             Caller("do_linkat", REQUIRED, 1),
-            Caller("vfs_rename", REQUIRED, 3, width=0x470),
+            Caller("vfs_rename", REQUIRED, 3, width=0x460),
             Caller("vfs_whiteout", REQUIRED, 1),
             Caller("link_path_walk", REQUIRED, 2),
             Caller("may_open", REQUIRED, 1),
@@ -338,7 +368,7 @@ ROUTES: List[Route] = [
             Caller("exportfs_get_name", REQUIRED, 1),
             Caller("fuse_readdir_backing", REQUIRED, 1),
             Caller("ovl_dir_read", REQUIRED, 1),
-            Caller("ovl_iterate", REQUIRED, 2, width=0x600),
+            Caller("ovl_iterate", REQUIRED, 2, width=0x4a0),
             Caller("iterate_incfs_dir", REQUIRED, 1),
             Caller("search_manager", REQUIRED, 1, owner=KSU,
                    note="KSU manager; no ksu_ prefix"),
@@ -496,7 +526,7 @@ ROUTES: List[Route] = [
         callers=(
             Caller("unix_stream_connect", OPTIONAL, 1),
             Caller("unix_dgram_connect", OPTIONAL, 1),
-            Caller("unix_dgram_sendmsg", OPTIONAL, 1),
+            Caller("unix_dgram_sendmsg", OPTIONAL, 1, width=0x660),
         ),
     ),
     # -- getattr interior ---------------------------------------------------------

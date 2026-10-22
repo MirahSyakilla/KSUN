@@ -60,6 +60,16 @@ bool ksu_avc_spoof_active(void);
  * 162; 176 keeps ~9% headroom for multi-site row growth under other
  * compiler shapes.  bl_policy.py:MAX_RECORDS must be kept in lockstep --
  * the offline analyzer hard-fails on divergence.
+ *
+ * Measured on THIS kernel (lisa 5.4.302-MeowKernel, arm64, clang 14
+ * -O3) the live census of the full SUSFS+NOMOUNT profile is 191 sites:
+ * every family above commits and consumes one record per patched call
+ * site, so the array is filled to 191 of its 192 slots.  The offline
+ * analyzer's budget (bl_policy.py) counts the same 191 sites, so the two
+ * budgets move together.  Any further site growth on this profile needs
+ * a capacity bump in lockstep (here, bl_manifest_schema.h and
+ * bl_policy.py) -- otherwise the next family to run out of records fails
+ * closed with -ENOSPC and rolls itself back.
  */
 #ifndef KSU_BL_MAX_RECORDS
 #define KSU_BL_MAX_RECORDS 192
@@ -1065,9 +1075,10 @@ static bool ksu_branch_link_patch_permission_family(void)
 		/* dedupe/clone range cross-file permission check. */
 		{ "vfs_dedupe_file_range_one", KSU_BL_SITE_REQUIRED, 1 },
 		/* exec: binfmt creds and dumpability.  flush_old_exec's
-		 * inode_permission site sits +0x520 in (next symbol +0x870),
-		 * past the default 0x400 window. */
-		{ "flush_old_exec", KSU_BL_SITE_REQUIRED, 1, 0x600 },
+		 * inode_permission site sits +0x500 in (next symbol +0x8c0),
+		 * past the default 0x400 window: 0x520 covers the site and
+		 * stops well short of the next symbol. */
+		{ "flush_old_exec", KSU_BL_SITE_REQUIRED, 1, 0x520 },
 		{ "would_dump", KSU_BL_SITE_REQUIRED, 1 },
 		{ "prepare_binprm", KSU_BL_SITE_REQUIRED, 1 },
 		/* path walk + creation family. */
@@ -1075,7 +1086,12 @@ static bool ksu_branch_link_patch_permission_family(void)
 		{ "vfs_create", KSU_BL_SITE_REQUIRED, 1 },
 		{ "vfs_mkobj", KSU_BL_SITE_REQUIRED, 1 },
 		{ "vfs_tmpfile", KSU_BL_SITE_REQUIRED, 1 },
-		{ "path_openat", KSU_BL_SITE_REQUIRED, 1 },
+		/* path_openat's inode_permission site sits +0x41c in (next
+		 * symbol +0xd60), past the default 0x400 window: without a
+		 * wider window the site is never found, the family fails
+		 * closed and the whole permission face dies (the kretprobe
+		 * fallback cannot take over -- CONFIG_KPROBES is off). */
+		{ "path_openat", KSU_BL_SITE_REQUIRED, 1, 0x420 },
 		{ "vfs_mknod", KSU_BL_SITE_REQUIRED, 1 },
 		{ "vfs_mkdir", KSU_BL_SITE_REQUIRED, 1 },
 		{ "may_delete", KSU_BL_SITE_REQUIRED, 1 },
@@ -1084,7 +1100,7 @@ static bool ksu_branch_link_patch_permission_family(void)
 		{ "do_linkat", KSU_BL_SITE_REQUIRED, 1 },
 		/* AUDIT=y grows vfs_rename; the third site sits +0x444 in
 		 * (next symbol +0x470), past the default 0x400 window. */
-		{ "vfs_rename", KSU_BL_SITE_REQUIRED, 3, 0x470 },
+		{ "vfs_rename", KSU_BL_SITE_REQUIRED, 3, 0x460 },
 		{ "vfs_whiteout", KSU_BL_SITE_REQUIRED, 1 },
 		{ "link_path_walk", KSU_BL_SITE_REQUIRED, 2 },
 		{ "may_open", KSU_BL_SITE_REQUIRED, 1 },
@@ -1397,8 +1413,8 @@ static bool ksu_branch_link_patch_getname_kernel_family(void)
 
 static bool ksu_branch_link_patch_iterate_dir_family(void)
 {
-	/* 10 BL sites.  ovl_iterate's second site sits +0x478 in (next
-	 * symbol +0x6b0), past the default 0x400 window. */
+	/* 10 BL sites.  ovl_iterate's second site sits +0x484 in (next
+	 * symbol +0x6f0), past the default 0x400 window. */
 	static const struct ksu_bl_manifest_caller callers[] = {
 		{ "__arm64_sys_getdents", KSU_BL_SITE_REQUIRED, 1 },
 		{ "ksys_getdents64", KSU_BL_SITE_REQUIRED, 1 },
@@ -1406,7 +1422,7 @@ static bool ksu_branch_link_patch_iterate_dir_family(void)
 		{ "exportfs_get_name", KSU_BL_SITE_REQUIRED, 1 },
 		{ "fuse_readdir_backing", KSU_BL_SITE_REQUIRED, 1 },
 		{ "ovl_dir_read", KSU_BL_SITE_REQUIRED, 1 },
-		{ "ovl_iterate", KSU_BL_SITE_REQUIRED, 2, 0x600 },
+		{ "ovl_iterate", KSU_BL_SITE_REQUIRED, 2, 0x4a0 },
 		{ "iterate_incfs_dir", KSU_BL_SITE_REQUIRED, 1 },
 		{ "search_manager", KSU_BL_SITE_REQUIRED, 1 },
 	};
@@ -1532,8 +1548,15 @@ static int ksu_bl_record_patch_routes(
 						       targets[t].hook);
 			sites = last_ret ? 0 : 1;
 #else
-			sites = ksu_bl_record_patch_all(name, caller_addr,
-							target, targets[t].hook);
+			/* Honour the caller's scan width here too: a routes
+			 * family whose caller holds its site past the default
+			 * KSU_BL_SCAN_WIDTH would otherwise silently miss it
+			 * (the width field used to be ignored on this path,
+			 * which is what left susfs/unix_find_other one site
+			 * short on unix_dgram_sendmsg). */
+			sites = ksu_bl_record_patch_all_width(name, caller_addr,
+							target, targets[t].hook,
+							caller->width);
 			last_ret = sites;
 #endif
 			if (sites > 0 && (unsigned int)sites >= caller->min_sites) {
@@ -2781,7 +2804,9 @@ static void ksu_branch_link_patch_unix_find_other(void)
 	static const struct ksu_bl_manifest_caller callers[] = {
 		{ "unix_stream_connect", KSU_BL_SITE_OPTIONAL, 1 },
 		{ "unix_dgram_connect", KSU_BL_SITE_OPTIONAL, 1 },
-		{ "unix_dgram_sendmsg", KSU_BL_SITE_OPTIONAL, 1 },
+		/* unix_dgram_sendmsg's second site sits +0x65c in (next
+		 * symbol +0xa60), past the default 0x400 window. */
+		{ "unix_dgram_sendmsg", KSU_BL_SITE_OPTIONAL, 1, 0x660 },
 	};
 	struct ksu_bl_manifest_target targets[] = {
 		{ "unix_find_other", (unsigned long)ksu_unix_find_other,
@@ -2817,8 +2842,13 @@ static bool ksu_branch_link_patch_susfs(void)
 		{ "do_sys_openat2", KSU_BL_SITE_REQUIRED, 1 },
 		{ "do_sys_open", KSU_BL_SITE_OPTIONAL, 1 },
 		/* Phase 18 adoption: same open-helper sites as the legacy
-		 * profile below; the old symbol-scoped probe covered them. */
-		{ "do_open_execat", KSU_BL_SITE_REQUIRED, 1 },
+		 * profile below; the old symbol-scoped probe covered them.
+		 * REVISED: do_open_execat() is a static helper that the
+		 * compiler inlines into its callers, so it owns no frame and
+		 * no BL site of its own.  The execve(2)/execveat(2) pathname
+		 * entry is the do_execveat_common() frame. */
+		{ "do_execveat_common", KSU_BL_SITE_REQUIRED, 1 },
+		{ "do_open_execat", KSU_BL_SITE_UNSUPPORTED, 0 },
 		{ "file_open_name", KSU_BL_SITE_REQUIRED, 1 },
 		/* open_exec() calls do_open_execat(); it holds no direct
 		 * do_filp_open site on 5.4 (objdump-verified 0 sites), so it
@@ -2835,12 +2865,15 @@ static bool ksu_branch_link_patch_susfs(void)
 		{ "do_sys_open", KSU_BL_SITE_REQUIRED, 1 },
 		{ "do_sys_openat2", KSU_BL_SITE_UNSUPPORTED, 0 },
 		/* Phase 18 adoption: the open-helper family also holds direct
-		 * do_filp_open sites on this image (do_open_execat +0x7c,
+		 * do_filp_open sites on this image (do_execveat_common +0x27c,
 		 * file_open_name +0xf8); the old symbol-scoped probe covered
-		 * them.  open_execat is the execve(2)/execveat(2) pathname
-		 * entry, file_open_name the kernel-internal named-open
-		 * helper; both flow through the same redirect wrapper. */
-		{ "do_open_execat", KSU_BL_SITE_REQUIRED, 1 },
+		 * them.  do_execveat_common is the execve(2)/execveat(2)
+		 * pathname entry (do_open_execat() is a static helper that is
+		 * fully inlined into it and owns no frame), file_open_name the
+		 * kernel-internal named-open helper; both flow through the
+		 * same redirect wrapper. */
+		{ "do_execveat_common", KSU_BL_SITE_REQUIRED, 1 },
+		{ "do_open_execat", KSU_BL_SITE_UNSUPPORTED, 0 },
 		{ "file_open_name", KSU_BL_SITE_REQUIRED, 1 },
 		/* open_exec() calls do_open_execat(); no direct do_filp_open
 		 * site on 5.4, so optional (required would fail the family). */
@@ -3281,6 +3314,14 @@ int ksu_branch_link_patch_init(void)
 			{ "__arm64_compat_sys_execveat", KSU_BL_SITE_UNSUPPORTED, 0 },
 #endif
 #endif
+			/* fs/exec.c reaches the common helper through four
+			 * syscall wrappers plus do_execve().  do_execve() is
+			 * non-static and stays a distinct frame, so its BL to
+			 * do_execveat_common() is attributed to do_execve
+			 * itself; the do_execve()/compat_do_execveat()
+			 * wrappers are static and get inlined into the
+			 * syscall entry points listed above. */
+			{ "do_execve", KSU_BL_SITE_REQUIRED, 1 },
 		};
 		static const char * const exec_targets[] = {
 			"do_execveat_common",

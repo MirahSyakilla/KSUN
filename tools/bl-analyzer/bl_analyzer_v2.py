@@ -43,6 +43,11 @@ EXIT_INPUT = 32
 EXIT_SYMBOL = 48
 EXIT_DRIFT = 64
 EXIT_MANIFEST = 80
+# Identity / fixed-point failure (stale inputs, payload drift).  The
+# coordinator treats 16 as "payload drifted, regenerate once"; without
+# the constant the fixed-point path raised NameError and exited 96
+# (internal error) instead of the documented 16.
+EXIT_IDENTITY = 16
 
 ARM64_EM = 183          # EM_AARCH64
 ET_EXEC = 2
