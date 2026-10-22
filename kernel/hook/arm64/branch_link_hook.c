@@ -891,6 +891,26 @@ static int ksu_bl_restore_records(void)
 	return ksu_bl_restore_records_from(0);
 }
 
+/* True when every branch-link record has been restored (family failure rolled
+ * back cleanly and NULLing a wrapper's fn slot is safe).  If any record could
+ * not be restored, live call sites may still branch into a wrapper whose slot
+ * would be dead -- keep the slot bound to the original instead of returning
+ * -EOPNOTSUPP from a hot VFS path.
+ *
+ * Outside the NoMount guard on purpose: the record array belongs to the
+ * branch-link subsystem itself and every family - NoMount's, sus_path's
+ * readlink face included - asks this question when it fails closed. */
+static bool ksu_bl_records_all_restored(void)
+{
+	int i;
+
+	for (i = 0; i < ksu_bl_record_count; i++) {
+		if (ksu_bl_records[i].state == KSU_BL_RECORD_ACTIVE)
+			return false;
+	}
+	return true;
+}
+
 #ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 /*
  * Permission family: replaces the inode_permission/generic_permission
@@ -907,23 +927,6 @@ static int ksu_bl_restore_records(void)
  * covers both legs.
  */
 static int (*inode_permission_fn)(struct inode *inode, int mask);
-
-
-/* True when every branch-link record has been restored (family failure rolled
- * back cleanly and NULLing a wrapper's fn slot is safe).  If any record could
- * not be restored, live call sites may still branch into a wrapper whose slot
- * would be dead -- keep the slot bound to the original instead of returning
- * -EOPNOTSUPP from a hot VFS path. */
-static bool ksu_bl_records_all_restored(void)
-{
-	int i;
-
-	for (i = 0; i < ksu_bl_record_count; i++) {
-		if (ksu_bl_records[i].state == KSU_BL_RECORD_ACTIVE)
-			return false;
-	}
-	return true;
-}
 
 static int __nocfi ksu_do_inode_permission(struct inode *inode, int mask)
 {
@@ -1774,23 +1777,39 @@ static bool ksu_branch_link_patch_faccessat_family(void)
 	return ready;
 }
 
-#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
+#if defined(CONFIG_KSU_HOOKLESS_NOMOUNT) || defined(CONFIG_KSU_HOOKLESS_SUSFS)
 static int (*do_readlinkat_fn)(int dfd, const char __user *pathname,
 				char __user *buf, int bufsiz);
 
 static int __nocfi ksu_do_readlinkat(int dfd, const char __user *pathname,
 				     char __user *buf, int bufsiz)
 {
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	struct ksu_nomount_lookup_scope lookup_scope;
+#endif
 	int (*orig_do_readlinkat)(int, const char __user *, char __user *, int);
 	int ret;
 
 	orig_do_readlinkat = READ_ONCE(do_readlinkat_fn);
 	if (unlikely(!orig_do_readlinkat))
 		return -EOPNOTSUPP;
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	ksu_nomount_lookup_scope_enter(&lookup_scope, dfd);
-	ret = orig_do_readlinkat(dfd, pathname, buf, bufsiz);
+#endif
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
+	/* sus_path's readlink face: a path sus_path hides answers -ENOENT
+	 * here, the same answer the stat family gives it (upstream
+	 * 9124eb15e).  The check runs BEFORE the kernel's own readlink, so
+	 * the symlink target never reaches the caller's buffer and the
+	 * answer cannot disagree with the stat family's. */
+	if (ksu_susfs_readlink_should_be_enoent(dfd, pathname))
+		ret = -ENOENT;
+	else
+#endif
+		ret = orig_do_readlinkat(dfd, pathname, buf, bufsiz);
+#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
 	ksu_nomount_lookup_scope_exit(&lookup_scope);
+#endif
 	return ret;
 }
 
@@ -1812,6 +1831,7 @@ static bool ksu_branch_link_patch_readlink_family(void)
 	unsigned long target = ksu_bl_lookup("do_readlinkat");
 	unsigned int found = 0;
 	unsigned int patched = 0;
+	bool ready;
 	int count;
 
 	WRITE_ONCE(do_readlinkat_fn,
@@ -1827,10 +1847,16 @@ static bool ksu_branch_link_patch_readlink_family(void)
 				"unrestorable sites; wrapper stays bound to "
 				"original\n");
 	}
+	ready = target && count > 0 && found == patched;
 	pr_info("branch_link: readlink profile=%s family=%u/%u sites=%d\n",
 		KSU_BL_READLINK_PROFILE,
 		patched, found, count);
-	return target && count > 0 && found == patched;
+#ifdef CONFIG_KSU_HOOKLESS_SUSFS
+	/* sus_path's readlink face lives in this wrapper, so the face is
+	 * armed exactly when the family committed. */
+	ksu_susfs_set_readlink_ready(ready);
+#endif
+	return ready;
 }
 #endif
 
@@ -2596,8 +2622,10 @@ ksu_do_filp_open(int dfd, struct filename *pathname,
 	if (unlikely(!orig_do_filp_open))
 		return ERR_PTR(-EOPNOTSUPP);
 
-	if (!pathname || IS_ERR(pathname) || !op)
-		return orig_do_filp_open(dfd, pathname, op);
+	if (!pathname || IS_ERR(pathname) || !op) {
+		file = orig_do_filp_open(dfd, pathname, op);
+		goto check;
+	}
 
 	/* getname() cannot see an arbitrary directory fd.  Rebuild a temporary
 	 * filename while the NoMount lookup scope supplies that fd, then retain the
@@ -2651,8 +2679,30 @@ ksu_do_filp_open(int dfd, struct filename *pathname,
 open:
 	file = orig_do_filp_open(dfd, open_name, op);
 out:
-	if (owned_name)
+	if (owned_name) {
 		putname(owned_name);
+		owned_name = NULL;
+	}
+check:
+	/* sus_path's O_PATH face: an O_PATH descriptor for a path sus_path
+	 * hides is never handed out (upstream 89dc20d2d).  An O_PATH
+	 * descriptor cannot be read, but it proves the file exists -
+	 * fstatat(fd, "", AT_EMPTY_PATH), readlink("/proc/self/fd/N") and an
+	 * O_PATH fd used as an *at() dirfd all work on it.
+	 *
+	 * The decision is made on the inode the kernel resolved
+	 * (file->f_path), not on the path string: re-resolving the name
+	 * here would be a second lookup that a rename in between could
+	 * point somewhere else.
+	 *
+	 * The descriptor is never created, so there is nothing to take back
+	 * and nothing to leak: the file is put here and the open answers
+	 * -ENOENT, and the caller never gets a descriptor number to
+	 * install. */
+	if (!IS_ERR(file) && ksu_susfs_opath_should_be_enoent(file)) {
+		fput(file);
+		file = ERR_PTR(-ENOENT);
+	}
 	return file;
 }
 
@@ -2942,6 +2992,9 @@ static bool ksu_branch_link_patch_susfs(void)
 			open_redirect_patched, open_redirect_found,
 			open_count);
 		ksu_susfs_set_open_redirect_ready(open_ready);
+		/* sus_path's O_PATH face lives in the same wrapper, so it is
+		 * armed exactly when this family committed. */
+		ksu_susfs_set_opath_ready(open_ready);
 	}
 
 	/*
@@ -3126,7 +3179,9 @@ int ksu_branch_link_patch_init(void)
 	ksu_bl_faccessat_ready =
 		ksu_branch_link_patch_faccessat_family();
 
-#ifdef CONFIG_KSU_HOOKLESS_NOMOUNT
+#if defined(CONFIG_KSU_HOOKLESS_NOMOUNT) || defined(CONFIG_KSU_HOOKLESS_SUSFS)
+	/* The readlink route is needed by NoMount's lookup scope and by
+	 * sus_path's readlink face alike. */
 	ksu_bl_readlink_ready = ksu_branch_link_patch_readlink_family();
 #endif
 

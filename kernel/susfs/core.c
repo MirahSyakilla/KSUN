@@ -1692,6 +1692,21 @@ static bool ksu_susfs_handle_features_compat(void __user *arg)
 		len += scnprintf(cmd->enabled_features + len,
 				 sizeof(cmd->enabled_features) - len,
 				 "sus_map_line_hides\n");
+	/* The two path faces are reported when the interception layer
+	 * managed to arm them, the kallsyms face when its show callback
+	 * is hooked. */
+	if (ksu_susfs_readlink_runtime_ready())
+		len += scnprintf(cmd->enabled_features + len,
+				 sizeof(cmd->enabled_features) - len,
+				 "sus_path_readlink\n");
+	if (ksu_susfs_opath_runtime_ready())
+		len += scnprintf(cmd->enabled_features + len,
+				 sizeof(cmd->enabled_features) - len,
+				 "sus_path_opath\n");
+	if (ksu_susfs_kallsyms_hide_ready())
+		len += scnprintf(cmd->enabled_features + len,
+				 sizeof(cmd->enabled_features) - len,
+				 "hide_ksu_susfs_symbols\n");
 #ifdef CONFIG_KSU_HACK_ARM64_BRANCH_LINK
 	if (ksu_susfs_open_redirect_runtime_ready())
 		len += scnprintf(cmd->enabled_features + len,

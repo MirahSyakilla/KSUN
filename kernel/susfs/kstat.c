@@ -637,6 +637,87 @@ int ksu_susfs_show_hides_count(void)
 	return atomic_read(&ksu_susfs_n_show_hides);
 }
 
+/*
+ * ---- the readlink face for sus_path ----
+ *
+ * Upstream's sus_path answers -ENOENT to readlink(2) for a registered path,
+ * the same answer the stat family gives for the very same path (upstream
+ * 9124eb15e).  The LKM reaches that face by pointing the inode at a copy of
+ * its i_op whose readlink slot is ours: that is the only way in, because
+ * do_readlinkat() only calls security_inode_readlink() and vfs_readlink()
+ * when
+ *
+ *      d_is_symlink(dentry) || inode->i_op->readlink
+ *
+ * holds, and a plain file satisfies neither - so the caller got -EINVAL
+ * ("this path is there") while the stat family said ENOENT.  That
+ * disagreement is itself the tell.
+ *
+ * Swapping a live inode's i_op is not this branch's way: it writes into an
+ * inode other threads own, it needs a per-inode lifetime, and the copy has
+ * to outlive the rule.  The face is answered at the syscall boundary
+ * instead: the readlink route is already intercepted, the path is resolved
+ * with the very lookup the kernel would do (LOOKUP_EMPTY, no final follow),
+ * and the very predicate the stat family asks - sus_path's inode identity -
+ * decides.  One predicate, one answer.
+ *
+ * The lookup is a second one, and it is the price of not touching the
+ * inode: a rename between the two lookups can point the second one
+ * somewhere else.  It is bounded by the same gate the stat family uses, so
+ * only the readers that are already filtered pay for it.
+ */
+bool ksu_susfs_readlink_should_be_enoent(int dfd, const char __user *pathname)
+{
+	struct path path;
+	bool hidden = false;
+	int empty = 0;
+	int err;
+
+	/* The same gate the stat family applies: a root or zygote-side reader
+	 * keeps the kernel's own answer. */
+	if (!ksu_susfs_path_filter_active())
+		return false;
+
+	/* LOOKUP_EMPTY and no final follow: the same lookup do_readlinkat()
+	 * performs, so the resolved object is the one the caller asked
+	 * about. */
+	err = user_path_at_empty(dfd, pathname, LOOKUP_EMPTY, &path, &empty);
+	if (err)
+		return false;
+	/* An "empty" path (the empty string) is answered -ENOENT by the
+	 * kernel itself, so there is nothing to decide here. */
+	if (!empty)
+		hidden = ksu_susfs_inode_is_hidden(d_backing_inode(path.dentry));
+	path_put(&path);
+	return hidden;
+}
+
+/*
+ * ---- the O_PATH face for sus_path ----
+ *
+ * An O_PATH descriptor does not read the file, but it proves the file
+ * exists: fstatat(fd, "", AT_EMPTY_PATH), readlink("/proc/self/fd/N") and
+ * an O_PATH fd used as an *at() dirfd all work on it, and that is all a
+ * detector needs (upstream 89dc20d2d).
+ *
+ * The decision is made on the inode the kernel resolved - file->f_path -
+ * and not on the path string: re-resolving the name here would be a second
+ * lookup that a rename in between could point somewhere else, and the inode
+ * is the whole input sus_path decides on anyway.
+ *
+ * The descriptor is never handed out.  The check runs on the file the open
+ * produced, before the caller installs it in the fd table, so there is no
+ * descriptor to take back, no descriptor table to repair, and no reference
+ * to leak: the file is put here and the open answers -ENOENT.
+ */
+bool ksu_susfs_opath_should_be_enoent(const struct file *file)
+{
+	if (!file || !(file->f_mode & FMODE_PATH))
+		return false;
+
+	return ksu_susfs_inode_is_hidden(d_backing_inode(file->f_path.dentry));
+}
+
 static bool ksu_susfs_sus_map_hide_vma_current(struct vm_area_struct *vma,
 					       struct mm_struct *locked_mm)
 {
@@ -745,6 +826,33 @@ bool ksu_susfs_kstat_runtime_ready(void)
 	return READ_ONCE(ksu_susfs_getattr_ready);
 }
 #endif
+
+/* Which of the two new path faces are armed at runtime.  The branch-link
+ * layer publishes what it managed to install - the same way the
+ * open_redirect and the mount families do - so the enabled-features list
+ * can state what is active rather than what was merely compiled in. */
+static bool ksu_susfs_readlink_ready;
+static bool ksu_susfs_opath_ready;
+
+void ksu_susfs_set_readlink_ready(bool ready)
+{
+	ksu_susfs_readlink_ready = ready;
+}
+
+bool ksu_susfs_readlink_runtime_ready(void)
+{
+	return READ_ONCE(ksu_susfs_readlink_ready);
+}
+
+void ksu_susfs_set_opath_ready(bool ready)
+{
+	ksu_susfs_opath_ready = ready;
+}
+
+bool ksu_susfs_opath_runtime_ready(void)
+{
+	return READ_ONCE(ksu_susfs_opath_ready);
+}
 
 #ifdef CONFIG_KRETPROBES
 static int ksu_susfs_kstat_vfs_getattr_handler(struct kretprobe_instance *ri,
@@ -3279,6 +3387,157 @@ out:
 	return true;
 }
 
+/*
+ * ---- hide the ksu_/susfs_ symbols from /proc/kallsyms ----
+ *
+ * Upstream's susfs_hide_syms hangs a kprobe on the kallsyms s_show()
+ * callback and skips the line when the symbol name matches.  A kprobe is not
+ * an option here (CONFIG_KPROBES is off on purpose on this kernel), so the
+ * callback is hooked directly instead: the kallsyms_op seq_operations table
+ * is patched exactly the way the maps and smaps show callbacks are patched
+ * (ksu_susfs_patch_seqop_show()), and the replacement drops the line the
+ * original just wrote.
+ *
+ * The line is judged as TEXT, not through a mirror of the kernel's struct
+ * kallsym_iter.  A mirror is not stable across kernel versions - upstream's
+ * own comment says so, pos_arch_end is gone in v6.5 - and a layout that
+ * drifted would shift the name and silently mis-hide while every counter
+ * still reported "armed".  The kernel's own format is
+ *
+ *      "<addr> <type> <name>\n"                (core symbol)
+ *      "<addr> <type> <name>\t[<module>]\n"    (module symbol)
+ *
+ * so the name is the third field and it ends at the first tab or newline
+ * after it.
+ */
+static const char * const ksu_susfs_hidden_symbol_prefixes[] = {
+	"ksu_", "__ksu_", "susfs_", "susfs_guard_lkm", "ksud",
+	"is_ksu_", "is_manager_", "escape_to_", "setup_selinux",
+	"track_throne", "on_post_fs_data", "try_umount", "kernelsu",
+	"__initcall__kmod_kernelsu", "apply_kernelsu", "handle_sepolicy",
+	"getenforce", "setenforce", "is_zygote",
+};
+
+/* A bounded substring search.  The symbol name is a slice of the seq
+ * buffer, not a NUL-terminated string, and memmem() does not exist on every
+ * kernel this branch builds against. */
+static bool ksu_susfs_name_contains(const char *name, size_t len,
+				    const char *needle)
+{
+	size_t nlen = strlen(needle);
+	size_t i;
+
+	if (!nlen || len < nlen)
+		return false;
+
+	for (i = 0; i + nlen <= len; i++) {
+		if (name[i] == needle[0] && !memcmp(name + i, needle, nlen))
+			return true;
+	}
+	return false;
+}
+
+static bool ksu_susfs_symbol_name_hidden(const char *name, size_t len)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(ksu_susfs_hidden_symbol_prefixes); i++) {
+		size_t plen = strlen(ksu_susfs_hidden_symbol_prefixes[i]);
+
+		if (len >= plen &&
+		    !memcmp(name, ksu_susfs_hidden_symbol_prefixes[i], plen))
+			return true;
+	}
+
+	/* The names whose prefix is not in the list above.  Upstream's rule
+	 * is "the name contains ksu or susfs anywhere", which is what
+	 * catches anon_ksu_fops, setup_ksu_cred and is_task_ksu_domain.
+	 * The token form is used here instead of the bare substring,
+	 * because a bare "ksu" also matches the core kernel's own ksuid
+	 * helpers (ksuid_to_u32 and friends), which have nothing to do
+	 * with KernelSU and whose disappearance from /proc/kallsyms would
+	 * be a visible difference from a stock kernel. */
+	if (ksu_susfs_name_contains(name, len, "_ksu"))
+		return true;
+	if (ksu_susfs_name_contains(name, len, "susfs"))
+		return true;
+
+	return false;
+}
+
+/* Pull the symbol name out of one rendered kallsyms line. */
+static bool ksu_susfs_kallsyms_line_hidden(const char *line, size_t len)
+{
+	const char *end = line + len;
+	const char *name;
+	const char *sp1;
+	const char *sp2;
+	size_t name_len = 0;
+
+	sp1 = memchr(line, ' ', len);
+	if (!sp1)
+		return false;
+	sp2 = memchr(sp1 + 1, ' ', end - sp1 - 1);
+	if (!sp2)
+		return false;
+
+	name = sp2 + 1;
+	while (name + name_len < end &&
+	       name[name_len] != '\t' && name[name_len] != '\n')
+		name_len++;
+	if (!name_len)
+		return false;
+
+	return ksu_susfs_symbol_name_hidden(name, name_len);
+}
+
+static int (*ksu_susfs_orig_kallsyms_show)(struct seq_file *m, void *v);
+static const struct seq_operations *ksu_susfs_kallsyms_seqops;
+static bool ksu_susfs_kallsyms_ready;
+/* Lines dropped by the kallsyms show callback.  Reported next to the
+ * map/smap counter so that "the hook is not installed" and "the hook is
+ * installed but matched nothing" can be told apart. */
+static atomic_t ksu_susfs_n_kallsyms_hides = ATOMIC_INIT(0);
+
+int ksu_susfs_kallsyms_hides_count(void)
+{
+	return atomic_read(&ksu_susfs_n_kallsyms_hides);
+}
+
+bool ksu_susfs_kallsyms_hide_ready(void)
+{
+	return READ_ONCE(ksu_susfs_kallsyms_ready);
+}
+
+static int ksu_susfs_kallsyms_show(struct seq_file *m, void *v)
+{
+	size_t before;
+	int ret;
+
+	if (unlikely(!ksu_susfs_orig_kallsyms_show))
+		return -EOPNOTSUPP;
+
+	/* The original renders exactly one line into the seq buffer; the
+	 * region it appended is what has to be judged.  A count that went
+	 * backwards would mean the buffer was flushed while the line was
+	 * being written (a kernel that copies the buffer out mid-line);
+	 * that line is already in the reader's buffer and cannot be taken
+	 * back, so it is left alone. */
+	before = m->count;
+	ret = ksu_susfs_orig_kallsyms_show(m, v);
+	if (ret || !m->buf || m->count <= before)
+		return ret;
+
+	if (ksu_susfs_kallsyms_line_hidden(m->buf + before, m->count - before)) {
+		/* Drop the line.  The buffer holds whole lines only, so
+		 * rewinding the count removes exactly this symbol and
+		 * nothing else. */
+		m->count = before;
+		atomic_inc(&ksu_susfs_n_kallsyms_hides);
+	}
+	return ret;
+}
+
 int ksu_susfs_kstat_init(void)
 {
 	unsigned long addr;
@@ -3330,6 +3589,27 @@ int ksu_susfs_kstat_init(void)
 		} else {
 			ksu_susfs_smaps_ready = true;
 		}
+	}
+
+	/* The kallsyms show callback is hooked the same way the maps and
+	 * smaps ones are: the table is patched, not probed.  A failure here
+	 * is not fatal - the ksu_/susfs_ symbols simply stay visible. */
+	addr = find_kernel_symbol_exact("kallsyms_op");
+	if (addr) {
+		ksu_susfs_kallsyms_seqops = (const struct seq_operations *)addr;
+		err = ksu_susfs_patch_seqop_show(ksu_susfs_kallsyms_seqops,
+						 ksu_susfs_kallsyms_show,
+						 &ksu_susfs_orig_kallsyms_show);
+		if (err) {
+			pr_warn("susfs: kallsyms seq wrapper unavailable: %d\n",
+				err);
+			ksu_susfs_kallsyms_seqops = NULL;
+		} else {
+			ksu_susfs_kallsyms_ready = true;
+			pr_info("susfs: kallsyms show wrapped, ksu_/susfs_ symbols are hidden\n");
+		}
+	} else {
+		pr_warn("susfs: kallsyms_op not found - ksu_/susfs_ symbols stay visible in /proc/kallsyms\n");
 	}
 
 #ifdef KSU_SUSFS_HAS_SMAPS_ROLLUP
@@ -3569,6 +3849,13 @@ void ksu_susfs_kstat_exit(void)
 		ksu_susfs_maps_ready = false;
 	}
 	ksu_susfs_maps_seqops = NULL;
+
+	if (ksu_susfs_kallsyms_ready) {
+		ksu_susfs_restore_seqop_show(ksu_susfs_kallsyms_seqops,
+					     &ksu_susfs_orig_kallsyms_show);
+		ksu_susfs_kallsyms_ready = false;
+	}
+	ksu_susfs_kallsyms_seqops = NULL;
 
 #ifdef CONFIG_KRETPROBES
 	ksu_susfs_destroy_kretprobe(&ksu_susfs_vfs_getattr_nosec_rp);
