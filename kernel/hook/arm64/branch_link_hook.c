@@ -48,6 +48,9 @@ bool ksu_avc_spoof_active(void);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
 #define KSU_BL_CONSERVATIVE_RUNTIME_PATCHES 1
 #endif
+#ifndef KSU_BL_CONSERVATIVE_RUNTIME_PATCHES
+#define KSU_BL_CONSERVATIVE_RUNTIME_PATCHES 0
+#endif
 /*
  * Record capacity must cover every manifest family's worst-case site count
  * (core hook families + stat/exec/mount/susfs routes).  The historical 96
@@ -1613,9 +1616,10 @@ failed:
 	 * may still branch into the wrapper and the slot must keep pointing at
 	 * the original (wrapper then behaves as if uninstalled). */
 	if (ksu_bl_records_all_restored()) {
-		while (prev_slot_count)
-			WRITE_ONCE(*prev_slot_refs[--prev_slot_count],
-				   prev_slots[prev_slot_count]);
+		while (prev_slot_count) {
+			typeof(prev_slot_count) idx = --prev_slot_count;
+			WRITE_ONCE(*prev_slot_refs[idx], prev_slots[idx]);
+		}
 	} else {
 		pr_warn("branch_link: %s rollback left unrestorable sites; "
 			"slots stay bound to original\n", name);
