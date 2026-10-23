@@ -243,7 +243,7 @@ const char *ksu_bl_generated_group_name(u16 group_id)
 	return ksu_bl_manifest_groups[group_id];
 }
 
-void __init ksu_bl_manifest_init(void)
+void ksu_bl_manifest_init(void)
 {
 	ksu_bl_manifest_valid = ksu_bl_manifest_validate();
 	if (ksu_bl_manifest_valid) {
