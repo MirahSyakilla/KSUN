@@ -19,7 +19,7 @@ struct ksu_bl_gen_caller;
 struct ksu_bl_gen_target;
 
 #ifdef CONFIG_KSU_BL_GENERATED
-void __init ksu_bl_manifest_init(void);
+void ksu_bl_manifest_init(void);
 bool ksu_bl_generated_manifest_ready(void);
 const struct ksu_bl_gen_route *ksu_bl_generated_route(u16 id);
 const struct ksu_bl_gen_caller *ksu_bl_generated_callers(
