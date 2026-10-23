@@ -72,7 +72,7 @@ Android ARM64 kernel — not an Android APK installation.
 From the root of your kernel source tree:
 
 ```bash
-curl -LSs "https://raw.githubusercontent.com/MirahSyakilla/KSUN/susfs-nomount/kernel/setup.sh" | bash -
+curl -LSs "https://raw.githubusercontent.com/MirahSyakilla/KSUN/latest/kernel/setup.sh" | bash -
 ```
 
 What the script does:
