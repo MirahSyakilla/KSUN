@@ -9,7 +9,7 @@
 /* Module visible ABI version.  Bumped whenever the transport or the wire
  * format changes so that a mismatched client is detected instead of being
  * silently mis-parsed. */
-#define KSU_NOMOUNT_VERSION 15
+#define KSU_NOMOUNT_VERSION 16
 /* Transport revision: 1 was the Generic Netlink family, 2 is the keyring
  * transport. */
 #define KSU_NOMOUNT_TRANSPORT_VERSION 2
@@ -26,7 +26,16 @@
 
 #define KSU_NOMOUNT_FLAG_IS_DIR (1U << 1)
 #define KSU_NOMOUNT_FLAG_WHITEOUT (1U << 2)
+#define KSU_NOMOUNT_FLAG_OPAQUE (1U << 3)
+#define KSU_NOMOUNT_FLAG_MASK \
+	(KSU_NOMOUNT_FLAG_IS_DIR | KSU_NOMOUNT_FLAG_WHITEOUT | \
+	 KSU_NOMOUNT_FLAG_OPAQUE)
 #define KSU_NOMOUNT_FLAG_INTERNAL (1U << 31)
+
+/* uid scoping fields of a rule: start==0 && end==0 means the global fallback
+ * scope (every uid); otherwise [start, end] inclusive.  deny_* carve out an
+ * exclusion range inside the target scope. */
+#define KSU_NOMOUNT_UID_SCOPE_ALL(uid, end) (!(uid) && !(end))
 
 enum ksu_nomount_cmd {
 	KSU_NOMOUNT_CMD_UNSPEC = 0,
@@ -37,6 +46,11 @@ enum ksu_nomount_cmd {
 	KSU_NOMOUNT_CMD_ADD_UID,
 	KSU_NOMOUNT_CMD_DEL_UID,
 	KSU_NOMOUNT_CMD_GET_LIST,
+	KSU_NOMOUNT_CMD_CLEAR_RULES,
+	KSU_NOMOUNT_CMD_CLEAR_UIDS,
+	KSU_NOMOUNT_CMD_GET_UIDS,
+	KSU_NOMOUNT_CMD_BLOCK_ISOLATED,
+	KSU_NOMOUNT_CMD_GET_ISOLATED_STATE,
 	__KSU_NOMOUNT_CMD_MAX,
 };
 #define KSU_NOMOUNT_CMD_MAX (__KSU_NOMOUNT_CMD_MAX - 1)
@@ -74,6 +88,33 @@ struct ksu_nomount_version {
 	u32 transport;
 };
 
+/*
+ * Wire record headers for the rule tables (compatible with the upstream
+ * v2.2.0 layout).  ADD_RULE and DEL_RULE carry zero or more
+ * KSU_NOMOUNT_RULE_HDR_SIZE / KSU_NOMOUNT_DEL_HDR_SIZE prefixed records
+ * inside the payload buffer.
+ */
+#define KSU_NOMOUNT_RULE_HDR_SIZE 24
+#define KSU_NOMOUNT_DEL_HDR_SIZE 18
+
+struct ksu_nomount_rule_hdr {
+	u32 flags;
+	u32 uid_start;
+	u32 uid_end;
+	u32 deny_start;
+	u32 deny_end;
+	u16 v_len;
+	u16 r_len;
+};
+
+struct ksu_nomount_del_hdr {
+	u32 uid_start;
+	u32 uid_end;
+	u32 deny_start;
+	u32 deny_end;
+	u16 v_len;
+} __packed;
+
 struct ksu_nomount_dump_state {
 	u32 bucket;
 	u32 index;
@@ -101,15 +142,30 @@ void ksu_nomount_init(void);
 void ksu_nomount_exit(void);
 
 int ksu_nomount_add_rule(const char *virtual_path, const char *real_path,
-			 u32 flags);
-int ksu_nomount_del_rule(const char *virtual_path);
-int ksu_nomount_del_rules(char **virtual_paths, unsigned int count);
+			 u32 flags, u32 uid_start, u32 uid_end, u32 deny_start,
+			 u32 deny_end);
+int ksu_nomount_del_rule(const char *virtual_path, u32 uid_start, u32 uid_end,
+			 u32 deny_start, u32 deny_end);
+int ksu_nomount_del_rules(char **virtual_paths, unsigned int count,
+			  u32 uid_start, u32 uid_end, u32 deny_start,
+			  u32 deny_end);
+void ksu_nomount_clear_rules(void);
+void ksu_nomount_clear_uids(void);
 void ksu_nomount_clear_all(void);
 int ksu_nomount_add_uid(uid_t uid);
 int ksu_nomount_del_uid(uid_t uid);
 int ksu_nomount_get_dump_rule(struct ksu_nomount_dump_state *state,
 			      char *virtual_path, size_t virtual_size,
-			      char *real_path, size_t real_size, u32 *flags);
+			      char *real_path, size_t real_size, u32 *flags,
+			      u32 *uid_start, u32 *uid_end, u32 *deny_start,
+			      u32 *deny_end);
+/* GET_UIDS pagination: *cursor carries (bucket << 32 | index) between calls,
+ * 0 meaning "start over"; the kernel sets *cursor to the next token and
+ * *count to the uids stored in uids[] (0 when the walk is exhausted). */
+int ksu_nomount_get_uids(u64 *cursor, u32 *uids, size_t max_uids,
+			 size_t *count);
+bool ksu_nomount_block_isolated(void);
+void ksu_nomount_set_block_isolated(bool on);
 
 /* Called from the runtime hooks in hooks.c. */
 struct filename *ksu_nomount_handle_getname(struct filename *name);

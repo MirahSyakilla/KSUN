@@ -96,15 +96,33 @@ private backend through another pathname in the same syscall.
 checked in the filename constructor and in readdir, block/unblock and rule
 deletion do not depend on dropping global dentries.
 
+UID-scoped rules (ABI 16) narrow a rule to a UID window.  `--uid a` sets one
+inlet (`start == end == a`), `--uid-range a b` sets `[a, b]`, and a rule with
+`start == 0 && end == 0` is the global fallback that covers every UID outside
+its deny window.  `--uid-excluded c` carves a single-UID denial window inside
+the scope: UIDs inside the scope but inside the deny window resolve the stock
+path.  Scopes may not overlap one virtual path (`EEXIST`), deny windows must
+stay inside their scope (`EINVAL` otherwise), and rules with the same scope
+but different deny windows may coexist.  Deleting a rule matches all of its
+fields exactly (virtual path, real path, flags and the UID/deny windows);
+anything less exact is rejected with `ENOENT` so a scoped rule can never be
+removed by a plain alias.
+
+Directory rules accept the `--opaque` flag.  An opaque directory stops
+resolving stock children by name (lookups return negative dentries) while
+readdir still enumerates the backend directory, matching upstream v2.2.0
+semantics.
+
 ## Keyring transport ABI
 
 The public ABI is:
 
 - key type name `nomount`
 - transport version `2`
-- module ABI version `15`
+- module ABI version `16`
 - commands `GET_VERSION`, `ADD_RULE`, `DEL_RULE`, `CLEAR_ALL`, `ADD_UID`,
-  `DEL_UID`, and `GET_LIST`
+  `DEL_UID`, `GET_LIST`, `CLEAR_RULES`, `CLEAR_UIDS`, `GET_UIDS`,
+  `BLOCK_ISOLATED`, and `GET_ISOLATED_STATE`
 
 The runtime is driven the way upstream NoMount drives it: the client hands the
 kernel the address of a command payload with `add_key(2)` using the `nomount`
@@ -134,15 +152,17 @@ u64 arg1         command argument, continuation token of the rule dump
 u8  buffer[]     command payload
 ```
 
-The packed batch format is unchanged: `ADD_RULE` carries `u32 flags | u16
-v_len | u16 r_len` records followed by the virtual and real pathnames,
-`DEL_RULE` carries `u16 v_len` records followed by the virtual pathname.
+The batch format follows the upstream v2.2.0 layout: `ADD_RULE` carries
+records prefixed with a 24-byte rule header (`u32 flags | u32 uid_start |
+u32 uid_end | u32 deny_start | u32 deny_end | u16 v_len | u16 r_len`),
+`DEL_RULE` carries records prefixed with an 18-byte deletion header
+(`u32 uid_start | u32 uid_end | u32 deny_start | u32 deny_end | u16 v_len`),
+each followed by the virtual and real pathnames.  `GET_UIDS` pages the UID
+exclusion list through `arg1` the same way `GET_LIST` pages rules.
 Batches are fully shape-checked before any rule is changed and embedded NULs
-are rejected.  Rules are global: one rule per virtual path, matched exactly
-or as a directory prefix, with the whiteout carried in the record flags.
-Upstream's per-UID rule scoping is not implemented, and the client reports
-the commands this kernel does not implement (`CLEAR_RULES`, `CLEAR_UIDS`,
-`GET_UIDS`, `BLOCK_ISOLATED_UIDS`) as unsupported.
+are rejected.  One rule exists per (virtual path, scope, deny window)
+triple, matched exactly or as a directory prefix for extensions, with
+whiteout and opaque carried in the record flags.
 
 `GET_LIST` pages through the rule table: the kernel returns as many records
 as fit into the payload buffer and stores the continuation token in `arg1`,
@@ -219,13 +239,17 @@ machinery, simply not present. Nothing in this tree depends on
 No build, flash, or live-device validation status should be inferred from this
 document; those are separate release checks.
 
-## Version 15
+## Version 16
 
-The NoMount ABI version is 15 and the transport version is 2. Version 14 and
-transport version 1 were the Generic Netlink family; the transport was
-replaced by the keyring transport because the netlink family could be reached
-from a user namespace and therefore allowed an unprivileged app to install
-global NoMount rules.
+The NoMount ABI version is 16 and the transport version is 2.  Version 15
+introduced the keyring transport (version 14 and transport version 1 were
+the Generic Netlink family; the transport was replaced because the netlink
+family could be reached from a user namespace and therefore allowed an
+unprivileged app to install global NoMount rules).  Version 16 grew the
+batch records to the upstream v2.2.0 headers and added the UID scoping,
+deny windows, opaque directories, the `CLEAR_RULES`/`CLEAR_UIDS`/`GET_UIDS`
+commands and the isolated-UID blocking toggle; a v16 CLI cannot talk to a
+v15 driver and vice versa.
 
 The runtime is modelled on
 `maxsteeel/nomount` `master` (v2.1.1, `NOMOUNT_BASE_VERSION` 21) rather

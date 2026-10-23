@@ -125,6 +125,9 @@ static DEFINE_SEQLOCK(ksu_susfs_uname_lock);
 
 static char ksu_susfs_fake_cmdline[KSU_SUSFS_FAKE_CMDLINE_OR_BOOTCONFIG_SIZE];
 static struct ksu_susfs_uname_cmd ksu_susfs_fake_uname;
+static struct ksu_susfs_uname_cmd ksu_susfs_orig_uname;
+static bool ksu_susfs_orig_uname_saved;
+static DEFINE_MUTEX(ksu_susfs_uname_compat_lock);
 static char *ksu_susfs_orig_saved_command_line;
 static char *ksu_susfs_cmdline_shadow;
 static const char *ksu_susfs_cmdline_active;
@@ -2776,18 +2779,28 @@ bool ksu_susfs_handle_uname_compat(void __user *arg)
 		goto out;
 	}
 
-	if (!strcmp(cmd.release, "default")) {
+	mutex_lock(&ksu_susfs_uname_compat_lock);
+
+	if (!ksu_susfs_orig_uname_saved) {
 		down_read(&uts_sem);
-		strscpy(release, utsname()->release, sizeof(release));
+		strscpy(ksu_susfs_orig_uname.release,
+			init_uts_ns.name.release,
+			sizeof(ksu_susfs_orig_uname.release));
+		strscpy(ksu_susfs_orig_uname.version,
+			init_uts_ns.name.version,
+			sizeof(ksu_susfs_orig_uname.version));
 		up_read(&uts_sem);
+		ksu_susfs_orig_uname_saved = true;
+	}
+
+	if (!strcmp(cmd.release, "default")) {
+		strscpy(release, ksu_susfs_orig_uname.release, sizeof(release));
 	} else {
 		strscpy(release, cmd.release, sizeof(release));
 	}
 
 	if (!strcmp(cmd.version, "default")) {
-		down_read(&uts_sem);
-		strscpy(version, utsname()->version, sizeof(version));
-		up_read(&uts_sem);
+		strscpy(version, ksu_susfs_orig_uname.version, sizeof(version));
 	} else {
 		strscpy(version, cmd.version, sizeof(version));
 	}
@@ -2806,9 +2819,15 @@ bool ksu_susfs_handle_uname_compat(void __user *arg)
 		sizeof(init_uts_ns.name.version));
 	up_write(&uts_sem);
 
-	if (!static_key_enabled(&ksu_susfs_uname_spoof_enabled)) {
+	if (!strcmp(cmd.release, "default") && !strcmp(cmd.version, "default")) {
+		if (static_key_enabled(&ksu_susfs_uname_spoof_enabled)) {
+			static_branch_disable(&ksu_susfs_uname_spoof_enabled);
+		}
+	} else if (!static_key_enabled(&ksu_susfs_uname_spoof_enabled)) {
 		static_branch_enable(&ksu_susfs_uname_spoof_enabled);
 	}
+
+	mutex_unlock(&ksu_susfs_uname_compat_lock);
 
 	cmd.err = 0;
 

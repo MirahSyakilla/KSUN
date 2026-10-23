@@ -42,12 +42,15 @@ struct ksu_nomount_dump_scratch {
 };
 
 /*
- * Wire format of the rule batches.  These helpers are the ones the retired
- * Generic Netlink transport used, kept verbatim so that both transports
- * agreed on the layout:
+ * Wire format of the rule batches.  Rules carry a 20-byte header with the
+ * uid scope (any u32 range pair; 0,0 means the "all uids" fallback scope),
+ * del batches an 18-byte header with the exact scope tuple that has to be
+ * removed:
  *
- *   add rule: u32 flags | u16 v_len | u16 r_len | vpath | rpath
- *   del rule: u16 v_len | vpath
+ *   add rule: u32 flags | u32 uid_start | u32 uid_end | u32 deny_start |
+ *             u32 deny_end | u16 v_len | u16 r_len | vpath | rpath
+ *   del rule: u32 uid_start | u32 uid_end | u32 deny_start | u32 deny_end |
+ *             u16 v_len | vpath
  *
  * Paths are length prefixed and never NUL terminated.
  */
@@ -75,16 +78,17 @@ static int ksu_nomount_validate_add_payload(const char *data, int len)
 		u32 flags;
 		u16 virtual_len, real_len;
 
-		if (len - pos < 8)
+		if (len - pos < KSU_NOMOUNT_RULE_HDR_SIZE)
 			return -EINVAL;
 		flags = get_unaligned((const u32 *)(data + pos));
-		virtual_len = get_unaligned((const u16 *)(data + pos + 4));
-		real_len = get_unaligned((const u16 *)(data + pos + 6));
-		pos += 8;
+		virtual_len = get_unaligned((const u16 *)(data + pos + 20));
+		real_len = get_unaligned((const u16 *)(data + pos + 22));
+		pos += KSU_NOMOUNT_RULE_HDR_SIZE;
 
 		if (!virtual_len || virtual_len >= KSU_NOMOUNT_MAX_PATH ||
 		    real_len >= KSU_NOMOUNT_MAX_PATH ||
 		    (!(flags & KSU_NOMOUNT_FLAG_WHITEOUT) && !real_len) ||
+		    flags & ~KSU_NOMOUNT_FLAG_MASK ||
 		    virtual_len > len - pos ||
 		    real_len > len - pos - virtual_len)
 			return -EINVAL;
@@ -106,10 +110,10 @@ static int ksu_nomount_validate_del_payload(const char *data, int len)
 	while (pos < len) {
 		u16 virtual_len;
 
-		if (len - pos < 2)
+		if (len - pos < KSU_NOMOUNT_DEL_HDR_SIZE)
 			return -EINVAL;
-		virtual_len = get_unaligned((const u16 *)(data + pos));
-		pos += 2;
+		virtual_len = get_unaligned((const u16 *)(data + pos + 16));
+		pos += KSU_NOMOUNT_DEL_HDR_SIZE;
 		if (!virtual_len || virtual_len >= KSU_NOMOUNT_MAX_PATH ||
 		    virtual_len > len - pos ||
 		    memchr(data + pos, '\0', virtual_len))
@@ -127,8 +131,8 @@ static int ksu_nomount_count_del_payload(const char *data, int len)
 	while (pos < len) {
 		u16 virtual_len;
 
-		virtual_len = get_unaligned((const u16 *)(data + pos));
-		pos += 2 + virtual_len;
+		virtual_len = get_unaligned((const u16 *)(data + pos + 16));
+		pos += KSU_NOMOUNT_DEL_HDR_SIZE + virtual_len;
 		count++;
 	}
 	return count;
@@ -153,18 +157,22 @@ static int ksu_nomount_keyring_add_rules(const char *data, int len)
 	if (ksu_nomount_validate_add_payload(data, len))
 		return -EINVAL;
 
-	while (pos + 8 <= len) {
+	while (pos + KSU_NOMOUNT_RULE_HDR_SIZE <= len) {
 		char *virtual_path = NULL;
 		char *real_path = NULL;
-		u32 flags;
+		u32 flags, uid_start, uid_end, deny_start, deny_end;
 		u16 virtual_len;
 		u16 real_len;
 		int err;
 
 		flags = get_unaligned((const u32 *)(data + pos));
-		virtual_len = get_unaligned((const u16 *)(data + pos + 4));
-		real_len = get_unaligned((const u16 *)(data + pos + 6));
-		pos += 8;
+		uid_start = get_unaligned((const u32 *)(data + pos + 4));
+		uid_end = get_unaligned((const u32 *)(data + pos + 8));
+		deny_start = get_unaligned((const u32 *)(data + pos + 12));
+		deny_end = get_unaligned((const u32 *)(data + pos + 16));
+		virtual_len = get_unaligned((const u16 *)(data + pos + 20));
+		real_len = get_unaligned((const u16 *)(data + pos + 22));
+		pos += KSU_NOMOUNT_RULE_HDR_SIZE;
 
 		if (virtual_len == 0 || pos + virtual_len + real_len > len)
 			return first_err ?: -EINVAL;
@@ -181,7 +189,8 @@ static int ksu_nomount_keyring_add_rules(const char *data, int len)
 
 		if (!err)
 			err = ksu_nomount_add_rule(virtual_path, real_path,
-						   flags);
+						   flags, uid_start, uid_end,
+						   deny_start, deny_end);
 		if (err && !first_err)
 			first_err = err;
 
@@ -202,11 +211,16 @@ static int ksu_nomount_keyring_del_rules(const char *data, int len)
 	char **paths;
 	int path_count;
 	unsigned int idx = 0;
+	u32 uid_start = 0, uid_end = 0, deny_start = 0, deny_end = 0;
 
 	if (len <= 0)
 		return -EINVAL;
 	if (ksu_nomount_validate_del_payload(data, len))
 		return -EINVAL;
+	uid_start = get_unaligned((const u32 *)(data));
+	uid_end = get_unaligned((const u32 *)(data + 4));
+	deny_start = get_unaligned((const u32 *)(data + 8));
+	deny_end = get_unaligned((const u32 *)(data + 12));
 	path_count = ksu_nomount_count_del_payload(data, len);
 	if (path_count <= 0)
 		return -EINVAL;
@@ -214,13 +228,13 @@ static int ksu_nomount_keyring_del_rules(const char *data, int len)
 	if (!paths)
 		return -ENOMEM;
 
-	while (pos + 2 <= len) {
+	while (pos + KSU_NOMOUNT_DEL_HDR_SIZE <= len) {
 		char *virtual_path = NULL;
 		u16 virtual_len;
 		int err;
 
-		virtual_len = get_unaligned((const u16 *)(data + pos));
-		pos += 2;
+		virtual_len = get_unaligned((const u16 *)(data + pos + 16));
+		pos += KSU_NOMOUNT_DEL_HDR_SIZE;
 		if (pos + virtual_len > len)
 			return first_err ?: -EINVAL;
 
@@ -240,7 +254,8 @@ static int ksu_nomount_keyring_del_rules(const char *data, int len)
 	if (!first_err && pos != len)
 		first_err = -EINVAL;
 	if (idx) {
-		int err = ksu_nomount_del_rules(paths, idx);
+		int err = ksu_nomount_del_rules(paths, idx, uid_start, uid_end,
+						deny_start, deny_end);
 
 		if (err && !first_err)
 			first_err = err;
@@ -253,7 +268,9 @@ static int ksu_nomount_keyring_del_rules(const char *data, int len)
 /*
  * Fill the payload buffer with as many rules as fit.  arg1 carries the
  * continuation token of the rule dump, so the client can page through the
- * rule table with repeated commands.
+ * rule table with repeated commands.  Each record carries the full
+ * KSU_NOMOUNT_RULE_HDR_SIZE header so the client can render the uid scope
+ * and the opaque flag per rule.
  */
 static int ksu_nomount_keyring_get_list(struct ksu_nomount_payload *payload)
 {
@@ -272,6 +289,7 @@ static int ksu_nomount_keyring_get_list(struct ksu_nomount_payload *payload)
 	for (;;) {
 		struct ksu_nomount_dump_state next = state;
 		u32 flags = 0;
+		u32 uid_start = 0, uid_end = 0, deny_start = 0, deny_end = 0;
 		u16 virtual_len;
 		u16 real_len;
 		size_t record;
@@ -280,7 +298,8 @@ static int ksu_nomount_keyring_get_list(struct ksu_nomount_payload *payload)
 						sizeof(scratch->virtual_path),
 						scratch->real_path,
 						sizeof(scratch->real_path),
-						&flags);
+						&flags, &uid_start, &uid_end,
+						&deny_start, &deny_end);
 		if (err == -ENOENT) {
 			err = 0;
 			break;
@@ -290,21 +309,30 @@ static int ksu_nomount_keyring_get_list(struct ksu_nomount_payload *payload)
 
 		virtual_len = (u16)strlen(scratch->virtual_path);
 		real_len = (u16)strlen(scratch->real_path);
-		record = 8 + (size_t)virtual_len + (size_t)real_len;
+		record = KSU_NOMOUNT_RULE_HDR_SIZE +
+			 (size_t)virtual_len + (size_t)real_len;
 		if (used + record > sizeof(payload->buffer)) {
 			err = 0;
 			break;
 		}
 
-		put_unaligned((u32)flags, (void *)(payload->buffer + used));
+		put_unaligned((u32)flags, (u32 *)(payload->buffer + used));
+		put_unaligned((u32)uid_start,
+			      (u32 *)(payload->buffer + used + 4));
+		put_unaligned((u32)uid_end,
+			      (u32 *)(payload->buffer + used + 8));
+		put_unaligned((u32)deny_start,
+			      (u32 *)(payload->buffer + used + 12));
+		put_unaligned((u32)deny_end,
+			      (u32 *)(payload->buffer + used + 16));
 		put_unaligned((u16)virtual_len,
-			      (void *)(payload->buffer + used + 4));
+			      (u16 *)(payload->buffer + used + 20));
 		put_unaligned((u16)real_len,
-			      (void *)(payload->buffer + used + 6));
-		memcpy(payload->buffer + used + 8, scratch->virtual_path,
-		       virtual_len);
-		memcpy(payload->buffer + used + 8 + virtual_len,
-		       scratch->real_path, real_len);
+			      (u16 *)(payload->buffer + used + 22));
+		memcpy(payload->buffer + used + KSU_NOMOUNT_RULE_HDR_SIZE,
+		       scratch->virtual_path, virtual_len);
+		memcpy(payload->buffer + used + KSU_NOMOUNT_RULE_HDR_SIZE +
+		       virtual_len, scratch->real_path, real_len);
 		used += record;
 
 		state = next;
@@ -314,6 +342,39 @@ static int ksu_nomount_keyring_get_list(struct ksu_nomount_payload *payload)
 	payload->data_size = used;
 	payload->arg1 = ((u64)state.bucket << 32) | (u64)state.index;
 	return err;
+}
+
+/* Paged blocking-uid list.  arg1 carries the cursor (bucket << 32 | entry
+ * counter) from the previous page; the reply rewrites arg1 with the next
+ * token (0 once exhausted).  Records are four-byte uids. */
+static int ksu_nomount_keyring_get_uids(struct ksu_nomount_payload *payload)
+{
+	size_t max, stored = 0, offset = 0;
+	u64 cursor = payload->arg1;
+	int err;
+
+	max = sizeof(payload->buffer) / sizeof(u32);
+	while (1) {
+		size_t count = 0;
+		u32 *out = (u32 *)(payload->buffer + offset);
+		size_t room = (sizeof(payload->buffer) - offset) /
+			      sizeof(u32);
+
+		if (!room)
+			break;
+		err = ksu_nomount_get_uids(&cursor, out, room, &count);
+		if (err)
+			return err;
+		if (!count)
+			break;
+		stored += count;
+		offset += count * sizeof(u32);
+		if (cursor == 0)
+			break;
+	}
+	payload->data_size = stored * sizeof(u32);
+	payload->arg1 = cursor;
+	return 0;
 }
 
 static void ksu_nomount_keyring_run(struct ksu_nomount_payload *payload)
@@ -343,7 +404,8 @@ static void ksu_nomount_keyring_run(struct ksu_nomount_payload *payload)
 		break;
 
 	case KSU_NOMOUNT_CMD_CLEAR_ALL:
-		ksu_nomount_clear_all();
+		ksu_nomount_clear_rules();
+		ksu_nomount_clear_uids();
 		break;
 
 	case KSU_NOMOUNT_CMD_ADD_UID:
@@ -356,6 +418,27 @@ static void ksu_nomount_keyring_run(struct ksu_nomount_payload *payload)
 
 	case KSU_NOMOUNT_CMD_GET_LIST:
 		status = ksu_nomount_keyring_get_list(payload);
+		break;
+
+	case KSU_NOMOUNT_CMD_CLEAR_RULES:
+		ksu_nomount_clear_rules();
+		break;
+
+	case KSU_NOMOUNT_CMD_CLEAR_UIDS:
+		ksu_nomount_clear_uids();
+		break;
+
+	case KSU_NOMOUNT_CMD_GET_UIDS:
+		status = ksu_nomount_keyring_get_uids(payload);
+		break;
+
+	case KSU_NOMOUNT_CMD_BLOCK_ISOLATED:
+		ksu_nomount_set_block_isolated(payload->target_uid != 0);
+		break;
+
+	case KSU_NOMOUNT_CMD_GET_ISOLATED_STATE:
+		payload->buffer[0] = ksu_nomount_block_isolated() ? '1' : '0';
+		payload->data_size = 1;
 		break;
 
 	default:
@@ -459,6 +542,10 @@ int ksu_nomount_keyring_init(void)
 	BUILD_BUG_ON(sizeof(struct ksu_nomount_payload) != 8192);
 	BUILD_BUG_ON(offsetof(struct ksu_nomount_payload, buffer) != 32);
 	BUILD_BUG_ON(sizeof(struct ksu_nomount_version) != 8);
+	BUILD_BUG_ON(sizeof(struct ksu_nomount_rule_hdr) !=
+		     KSU_NOMOUNT_RULE_HDR_SIZE);
+	BUILD_BUG_ON(sizeof(struct ksu_nomount_del_hdr) !=
+		     KSU_NOMOUNT_DEL_HDR_SIZE);
 
 	err = register_key_type(&ksu_nomount_key_type);
 	if (err)

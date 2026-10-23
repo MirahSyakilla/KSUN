@@ -175,7 +175,10 @@ Other SUSFS-adjacent behaviors are handled inside KernelSU:
 - `/proc/cmdline` spoofing swaps the KSU-visible `saved_command_line` pointer
   instead of patching proc entry source
 - `uname` spoofing reuses a KSU syscall hook instead of patching
-  `kernel/sys.c`
+  `kernel/sys.c`; the first `set_uname` captures the stock release/version,
+  `default` fields restore those originals in both the hook layer and the
+  kernel utsname (so restoring after an earlier spoof cannot re-spoof), and
+  a full restore also disarms the spoof static key
 - AVC spoofing reuses the existing KSU AVC path
 - delayed property hygiene restores BRENE-style resetprop coherence from a
   kernel-owned post-boot retry window

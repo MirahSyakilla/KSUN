@@ -84,6 +84,7 @@ struct ksu_nomount_parent {
 	u32 fs_type;
 	bool inode_hashed;
 	bool internal;
+	bool opaque;
 	char *path;
 };
 
@@ -126,6 +127,10 @@ struct ksu_nomount_rule {
 	u32 real_hash;
 	u32 basename_hash;
 	u32 flags;
+	u32 uid_start;
+	u32 uid_end;
+	u32 deny_start;
+	u32 deny_end;
 	unsigned long visible_ino;
 	unsigned long real_ino;
 	dev_t visible_dev;
@@ -180,6 +185,8 @@ struct ksu_nomount_iter_ctx {
 	unsigned long visible_ino;
 	unsigned long parent_visible_ino;
 	dev_t parent_dev;
+	bool suppress_native;
+	u32 uid;
 };
 
 static DEFINE_HASHTABLE(ksu_nomount_rules, KSU_NOMOUNT_HASH_BITS);
@@ -205,6 +212,7 @@ static atomic_t ksu_nomount_bypass_count = ATOMIC_INIT(0);
 static atomic_t ksu_nomount_access_scope_count = ATOMIC_INIT(0);
 static DEFINE_STATIC_KEY_FALSE(ksu_nomount_active_rules);
 static DEFINE_STATIC_KEY_FALSE(ksu_nomount_active_uids);
+static bool ksu_nomount_blk_isolated;
 
 static u32 ksu_nomount_hash_path_len(const char *path, size_t len)
 {
@@ -401,22 +409,72 @@ static int ksu_nomount_access_scope_enter(
 	return err;
 }
 
+/* Android multi-user uid layout: uid = user * 100000 + app_id; the
+ * [90000, 99999] app_id window hosts isolatedProcess sandboxed apps. */
+#define KSU_NOMOUNT_PER_USER_RANGE 100000U
+#define KSU_NOMOUNT_ISOLATED_APP_START 90000U
+#define KSU_NOMOUNT_ISOLATED_APP_END 99999U
+
+static bool ksu_nomount_is_isolated_uid(u32 uid)
+{
+	u32 app_id = uid % KSU_NOMOUNT_PER_USER_RANGE;
+
+	return app_id >= KSU_NOMOUNT_ISOLATED_APP_START &&
+	       app_id <= KSU_NOMOUNT_ISOLATED_APP_END;
+}
+
+bool ksu_nomount_block_isolated(void)
+{
+	return READ_ONCE(ksu_nomount_blk_isolated);
+}
+
+void ksu_nomount_set_block_isolated(bool on)
+{
+	WRITE_ONCE(ksu_nomount_blk_isolated, on);
+}
+
+/*
+ * Does the rule's uid scoping admit this uid?  A rule without a target
+ * range (start == 0 && end == 0) is the global fallback scope and matches
+ * every uid that is not inside the optional deny window; scoped rules
+ * additionally require the uid to be inside [start, end].
+ */
+static bool ksu_nomount_rule_uid_match(const struct ksu_nomount_rule *rule,
+				       u32 uid)
+{
+	u32 start = READ_ONCE(rule->uid_start);
+	u32 end = READ_ONCE(rule->uid_end);
+	u32 deny_start = READ_ONCE(rule->deny_start);
+	u32 deny_end = READ_ONCE(rule->deny_end);
+
+	if ((start || end) && !(start && end))
+		return false;
+	if (start && (uid < start || uid > end))
+		return false;
+	if (deny_start && deny_end && uid >= deny_start && uid <= deny_end)
+		return false;
+	return true;
+}
+
 static bool ksu_nomount_uid_blocked(uid_t uid)
 {
 	struct ksu_nomount_uid *entry;
+	bool blocked = false;
+	bool isolated;
 
-	if (!static_branch_unlikely(&ksu_nomount_active_uids))
+	isolated = READ_ONCE(ksu_nomount_blk_isolated) &&
+		   ksu_nomount_is_isolated_uid((u32)uid);
+	if (!static_branch_unlikely(&ksu_nomount_active_uids) && !isolated)
 		return false;
-
 	rcu_read_lock();
 	hash_for_each_possible_rcu(ksu_nomount_uids, entry, node, uid) {
 		if (entry->uid == uid) {
-			rcu_read_unlock();
-			return true;
+			blocked = true;
+			break;
 		}
 	}
 	rcu_read_unlock();
-	return false;
+	return blocked || isolated;
 }
 
 static bool ksu_nomount_should_skip(void)
@@ -737,6 +795,104 @@ static struct ksu_nomount_rule *ksu_nomount_find_rule_locked(const char *path)
 	return ksu_nomount_find_rule_locked_len(path, strlen(path));
 }
 
+/* Number of user-visible rules published for an exact vpath (internal
+ * ancestor plumbing does not count). */
+static u32 ksu_nomount_vpath_rule_count_locked(const char *path, size_t len,
+					       u32 hash)
+{
+	struct ksu_nomount_rule *rule;
+	u32 count = 0;
+
+	hash_for_each_possible(ksu_nomount_rules, rule, path_node, hash) {
+		if (READ_ONCE(rule->flags) & KSU_NOMOUNT_FLAG_INTERNAL)
+			continue;
+		if (rule->hash == hash && rule->virtual_len == len &&
+		    !memcmp(rule->virtual_path, path, len))
+			count++;
+	}
+	return count;
+}
+
+/* First rule of an exact vpath whose scope tuple matches the delete/replace
+ * request.  Internal rules match only the global tuple (they are not
+ * deletable through DEL_RULE, but ADD uses the internal takeover path). */
+static struct ksu_nomount_rule *
+ksu_nomount_find_rule_tuple_locked(const char *path, size_t len, u32 hash,
+				   u32 uid_start, u32 uid_end,
+				   u32 deny_start, u32 deny_end, bool internal)
+{
+	struct ksu_nomount_rule *rule;
+
+	hash_for_each_possible(ksu_nomount_rules, rule, path_node, hash) {
+		bool rule_internal =
+			!!(READ_ONCE(rule->flags) & KSU_NOMOUNT_FLAG_INTERNAL);
+
+		if (rule->hash != hash || rule->virtual_len != len ||
+		    memcmp(rule->virtual_path, path, len))
+			continue;
+		if (rule_internal != internal)
+			continue;
+		if (READ_ONCE(rule->uid_start) != uid_start ||
+		    READ_ONCE(rule->uid_end) != uid_end ||
+		    READ_ONCE(rule->deny_start) != deny_start ||
+		    READ_ONCE(rule->deny_end) != deny_end)
+			continue;
+		return rule;
+	}
+	return NULL;
+}
+
+/* Upstream v2.2.0 scope validation: a deny window (if any) must be a
+ * complete, well-formed range inside the target scope; reversed windows get
+ * normalized.  A deny window requires a specific target scope. */
+static int
+ksu_nomount_validate_scope(u32 *uid_start, u32 *uid_end, u32 *deny_start,
+			   u32 *deny_end)
+{
+	u32 start = *uid_start;
+	u32 end = *uid_end;
+	u32 dstart = *deny_start;
+	u32 dend = *deny_end;
+	u32 tmp;
+
+	if ((start || end) && !(start && end))
+		return -EINVAL;
+	if (start && start > end)
+		return -EINVAL;
+	if (!dstart && dend)
+		return -EINVAL;
+	if (dstart && !dend)
+		return -EINVAL;
+	if (dstart) {
+		if (dstart > dend) {
+			tmp = dstart;
+			dstart = dend;
+			dend = tmp;
+		}
+		if (!start || dstart < start || dend > end)
+			return -EINVAL;
+	}
+	*uid_start = start;
+	*uid_end = end;
+	*deny_start = dstart;
+	*deny_end = dend;
+	return 0;
+}
+
+/* Upstream v2.2.0 overlap semantics: two specific scopes conflict when the
+ * ranges intersect; global fallback scopes are skipped from the conflict
+ * check and coexist with specific scopes. */
+static bool ksu_nomount_scope_overlaps(u32 start_a, u32 end_a, u32 start_b,
+				       u32 end_b)
+{
+	bool global_a = !start_a && !end_a;
+	bool global_b = !start_b && !end_b;
+
+	if (global_a || global_b)
+		return false;
+	return start_a <= end_b && start_b <= end_a;
+}
+
 /*
  * Relative names need a cwd d_path() reconstruction before their full path
  * can be matched.  That is materially more expensive than a normal negative
@@ -830,10 +986,14 @@ static struct ksu_nomount_rule *
 ksu_nomount_find_rule_rcu_len(const char *path, size_t len)
 {
 	struct ksu_nomount_rule *rule;
+	struct ksu_nomount_rule *best = NULL;
+	int best_class = 0; /* 3 = specific scope, 2 = fallback scope,
+			     * 1 = internal ancestor plumbing */
 	const char *name;
 	const char *end = path + len;
 	size_t name_len;
 	u32 hash;
+	u32 uid = current_uid().val;
 
 	if (!path || !len)
 		return NULL;
@@ -852,20 +1012,47 @@ ksu_nomount_find_rule_rcu_len(const char *path, size_t len)
 	 */
 	hash_for_each_possible_rcu(ksu_nomount_basenames, rule, basename_node,
 				   hash) {
-		if (rule->basename_hash == hash &&
-		    rule->basename_len == name_len &&
-		    rule->virtual_len == len &&
-		    !memcmp(rule->virtual_path, path, len))
-			return rule;
+		u32 flags;
+		bool internal;
+		int cls;
+
+		if (rule->basename_hash != hash ||
+		    rule->basename_len != name_len ||
+		    rule->virtual_len != len ||
+		    memcmp(rule->virtual_path, path, len))
+			continue;
+		flags = READ_ONCE(rule->flags);
+		internal = !!(flags & KSU_NOMOUNT_FLAG_INTERNAL);
+		if (internal) {
+			cls = 1;
+		} else {
+			if (!ksu_nomount_rule_uid_match(rule, uid))
+				continue;
+			cls = (READ_ONCE(rule->uid_start) ||
+			       READ_ONCE(rule->uid_end)) ? 3 : 2;
+		}
+		if (cls > best_class) {
+			best_class = cls;
+			best = rule;
+		}
+		if (best_class == 3)
+			break;
 	}
-	return NULL;
+	return best;
 }
 
 static struct ksu_nomount_rule *
+ksu_nomount_find_dir_prefix_candidate_rcu(const char *path, size_t len,
+					  u32 uid);
+
+static struct ksu_nomount_rule *
 ksu_nomount_find_dir_prefix_rule_rcu(const char *path, size_t len,
-					    size_t *prefix_len)
+				     size_t *prefix_len)
 {
+	struct ksu_nomount_rule *best = NULL;
+	size_t best_len = 0;
 	size_t end = len;
+	u32 uid = current_uid().val;
 
 	while (end > 1) {
 		struct ksu_nomount_rule *rule;
@@ -875,50 +1062,103 @@ ksu_nomount_find_dir_prefix_rule_rcu(const char *path, size_t len,
 		if (end <= 1)
 			break;
 		end--;
-		rule = ksu_nomount_find_rule_rcu_len(path, end);
-		if (rule && rule->d_type == DT_DIR &&
-		    !(READ_ONCE(rule->flags) & KSU_NOMOUNT_FLAG_WHITEOUT)) {
-			if (prefix_len)
-				*prefix_len = end;
-			return rule;
+		/* Inside-out semantic: the innermost matched directory rule
+		 * governs.  Candidates whose scope does not admit this uid
+		 * (except internal plumbing) are skipped and the search keeps
+		 * walking outward so an ancestor fallback can still apply. */
+		rule = ksu_nomount_find_dir_prefix_candidate_rcu(path, end, uid);
+		if (rule) {
+			best = rule;
+			best_len = end;
+			break;
 		}
 	}
-	return NULL;
+	if (best && prefix_len)
+		*prefix_len = best_len;
+	return best;
+}
+
+static struct ksu_nomount_rule *
+ksu_nomount_find_dir_prefix_candidate_rcu(const char *path, size_t len,
+					  u32 uid)
+{
+	u32 flags;
+	bool whiteout;
+	struct ksu_nomount_rule *rule = ksu_nomount_find_rule_rcu_len(path, len);
+
+	if (!rule)
+		return NULL;
+	flags = READ_ONCE(rule->flags);
+	whiteout = !!(flags & KSU_NOMOUNT_FLAG_WHITEOUT);
+	if (whiteout || READ_ONCE(rule->d_type) != DT_DIR)
+		return NULL;
+	if (!(flags & KSU_NOMOUNT_FLAG_INTERNAL) &&
+	    !ksu_nomount_rule_uid_match(rule, uid))
+		return NULL;
+	return rule;
 }
 
 static struct ksu_nomount_rule *
 ksu_nomount_find_real_rule_identity_rcu(unsigned long ino, dev_t dev)
 {
 	struct ksu_nomount_rule *rule;
+	struct ksu_nomount_rule *best = NULL;
+	u32 uid = current_uid().val;
 
 	hash_for_each_possible_rcu(ksu_nomount_real_inodes, rule, real_node,
 				   ino) {
-		if (rule->real_ino == ino && rule->real_dev == dev)
+		u32 flags;
+
+		if (rule->real_ino != ino || rule->real_dev != dev)
+			continue;
+		/* Scoped variants of one vpath share the backend identity, so
+		 * a uid-matched specific variant and any other variant carry
+		 * the same metadata; prefer the uid-matched one. */
+		flags = READ_ONCE(rule->flags);
+		if (!(flags & KSU_NOMOUNT_FLAG_INTERNAL) &&
+		    ksu_nomount_rule_uid_match(rule, uid) &&
+		    (READ_ONCE(rule->uid_start) || READ_ONCE(rule->uid_end)))
 			return rule;
+		if (!best)
+			best = rule;
 	}
-	return NULL;
+	return best;
 }
 
 static struct ksu_nomount_rule *
 ksu_nomount_find_real_rule_rcu_len(const char *path, size_t len)
 {
 	struct ksu_nomount_rule *rule;
+	struct ksu_nomount_rule *best = NULL;
 	u32 hash = ksu_nomount_hash_path_len(path, len);
+	u32 uid = current_uid().val;
 
 	hash_for_each_possible_rcu(ksu_nomount_real_paths, rule,
 				   real_path_node, hash) {
-		if (rule->real_hash == hash && rule->real_len == len &&
-		    !memcmp(rule->real_path, path, len))
+		u32 flags;
+
+		if (rule->real_hash != hash || rule->real_len != len ||
+		    memcmp(rule->real_path, path, len))
+			continue;
+		flags = READ_ONCE(rule->flags);
+		if (!(flags & KSU_NOMOUNT_FLAG_INTERNAL) &&
+		    ksu_nomount_rule_uid_match(rule, uid) &&
+		    (READ_ONCE(rule->uid_start) || READ_ONCE(rule->uid_end)))
 			return rule;
+		if (!best)
+			best = rule;
 	}
-	return NULL;
+	return best;
 }
 
 static struct ksu_nomount_rule *
 ksu_nomount_find_real_dir_prefix_rule_rcu(const char *path, size_t len,
 					  size_t *prefix_len)
 {
+	struct ksu_nomount_rule *best = NULL;
+	size_t best_len = 0;
 	size_t end = len;
+	u32 uid = current_uid().val;
 
 	while (end > 1) {
 		struct ksu_nomount_rule *rule;
@@ -929,14 +1169,19 @@ ksu_nomount_find_real_dir_prefix_rule_rcu(const char *path, size_t len,
 			break;
 		end--;
 		rule = ksu_nomount_find_real_rule_rcu_len(path, end);
-		if (rule && rule->d_type == DT_DIR &&
-		    !(READ_ONCE(rule->flags) & KSU_NOMOUNT_FLAG_WHITEOUT)) {
-			if (prefix_len)
-				*prefix_len = end;
-			return rule;
-		}
+		if (!rule || READ_ONCE(rule->d_type) != DT_DIR ||
+		    (READ_ONCE(rule->flags) & KSU_NOMOUNT_FLAG_WHITEOUT))
+			continue;
+		if (!(READ_ONCE(rule->flags) & KSU_NOMOUNT_FLAG_INTERNAL) &&
+		    !ksu_nomount_rule_uid_match(rule, uid))
+			continue;
+		best = rule;
+		best_len = end;
+		break;
 	}
-	return NULL;
+	if (best && prefix_len)
+		*prefix_len = best_len;
+	return best;
 }
 
 static struct ksu_nomount_rule *
@@ -1473,7 +1718,8 @@ ksu_nomount_alloc_rule(const char *virtual_path, const char *real_path,
 		       u32 flags, u8 d_type, const struct path *backend,
 		       bool visible_exists, unsigned long visible_ino,
 		       dev_t visible_dev,
-		       const struct kstatfs *visible_statfs)
+		       const struct kstatfs *visible_statfs,
+		       u32 uid_start, u32 uid_end, u32 deny_start, u32 deny_end)
 {
 	struct ksu_nomount_rule *rule;
 	const char *name;
@@ -1513,6 +1759,10 @@ ksu_nomount_alloc_rule(const char *virtual_path, const char *real_path,
 	rule->basename_hash = ksu_nomount_hash_path_len(
 		name, rule->basename_len);
 	rule->flags = flags;
+	rule->uid_start = uid_start;
+	rule->uid_end = uid_end;
+	rule->deny_start = deny_start;
+	rule->deny_end = deny_end;
 	rule->d_type = d_type;
 	rule->visible_exists = visible_exists &&
 		!(flags & KSU_NOMOUNT_FLAG_WHITEOUT);
@@ -1906,6 +2156,21 @@ static void ksu_nomount_unlink_rule_locked(struct ksu_nomount_rule *rule)
 	}
 }
 
+/* Opaque visibility of a redirected directory: true while an opaque,
+ * user-visible dir rule is published for the parent's own path. */
+static void ksu_nomount_parent_set_opaque_locked(
+	struct ksu_nomount_parent *parent)
+{
+	struct ksu_nomount_rule *rule = ksu_nomount_find_rule_locked(
+		parent->path);
+	u32 flags = rule ? READ_ONCE(rule->flags) : 0;
+	bool opaque = rule && READ_ONCE(rule->d_type) == DT_DIR &&
+		      !(flags & KSU_NOMOUNT_FLAG_INTERNAL) &&
+		      !!(flags & KSU_NOMOUNT_FLAG_OPAQUE);
+
+	WRITE_ONCE(parent->opaque, opaque);
+}
+
 static int ksu_nomount_publish_rule_locked(
 	struct ksu_nomount_rule *rule, struct list_head *rule_victims,
 	struct list_head *parent_victims)
@@ -1934,7 +2199,41 @@ static int ksu_nomount_publish_rule_locked(
 		err = PTR_ERR(parent);
 		goto out;
 	}
-	victim = ksu_nomount_find_rule_locked(rule->virtual_path);
+	victim = ksu_nomount_find_rule_tuple_locked(
+		rule->virtual_path, rule->virtual_len, rule->hash,
+		rule->uid_start, rule->uid_end, rule->deny_start,
+		rule->deny_end, false);
+	if (!victim) {
+		/* No exact tuple match: reject any conflicting specific scope
+		 * and take over a leftover internal ancestor at this vpath. */
+		struct ksu_nomount_rule *internal_takeover = NULL;
+		struct ksu_nomount_rule *other;
+
+		hash_for_each_possible(ksu_nomount_rules, other, path_node,
+				       rule->hash) {
+			u32 oflags;
+
+			if (other->hash != rule->hash ||
+			    other->virtual_len != rule->virtual_len ||
+			    memcmp(other->virtual_path, rule->virtual_path,
+				   rule->virtual_len))
+				continue;
+			oflags = READ_ONCE(other->flags);
+			if (oflags & KSU_NOMOUNT_FLAG_INTERNAL) {
+				if (!internal_takeover)
+					internal_takeover = other;
+				continue;
+			}
+			if (ksu_nomount_scope_overlaps(
+				    rule->uid_start, rule->uid_end,
+				    READ_ONCE(other->uid_start),
+				    READ_ONCE(other->uid_end))) {
+				err = -EEXIST;
+				goto out_drop_parent;
+			}
+		}
+		victim = internal_takeover;
+	}
 	rule->parent = parent;
 	shared_child = ksu_nomount_find_parent_child_rule_locked(
 		parent, rule->name, victim);
@@ -1988,6 +2287,7 @@ static int ksu_nomount_publish_rule_locked(
 		list_add_tail(&victim->gc_node, rule_victims);
 	}
 	ksu_nomount_link_rule_locked(rule);
+	ksu_nomount_parent_set_opaque_locked(parent);
 	if (!victim && atomic_inc_return(&ksu_nomount_rule_count) == 1)
 		static_branch_enable(&ksu_nomount_active_rules);
 	err = 0;
@@ -2025,6 +2325,7 @@ static int ksu_nomount_remove_rule_locked(
 	if (atomic_dec_return(&ksu_nomount_rule_count) == 0)
 		static_branch_disable(&ksu_nomount_active_rules);
 	list_add_tail(&rule->gc_node, rule_victims);
+	ksu_nomount_parent_set_opaque_locked(rule->parent);
 	ksu_nomount_drop_empty_parent_locked(rule->parent, parent_victims);
 	return 0;
 }
@@ -2034,7 +2335,8 @@ static void ksu_nomount_prune_internal_ancestors_locked(
 	struct list_head *parent_victims);
 
 static int ksu_nomount_del_normalized_locked(
-	const char *normalized, const char *parent_path,
+	const char *normalized, size_t len, u32 hash, const char *parent_path,
+	u32 uid_start, u32 uid_end, u32 deny_start, u32 deny_end,
 	struct list_head *rule_victims, struct list_head *parent_victims,
 	bool prune_parent)
 {
@@ -2042,11 +2344,17 @@ static int ksu_nomount_del_normalized_locked(
 	u32 old_flags;
 	int err;
 
-	rule = ksu_nomount_find_rule_locked(normalized);
-	if (!rule || (rule->flags & KSU_NOMOUNT_FLAG_INTERNAL))
+	rule = ksu_nomount_find_rule_tuple_locked(normalized, len, hash,
+						  uid_start, uid_end,
+						  deny_start, deny_end, false);
+	if (!rule)
 		return -ENOENT;
 	if (rule->d_type == DT_DIR &&
-	    ksu_nomount_path_has_children_locked(normalized)) {
+	    ksu_nomount_path_has_children_locked(normalized) &&
+	    ksu_nomount_vpath_rule_count_locked(normalized, len, hash) == 1) {
+		/* Converting the last rule of a mapped directory keeps the
+		 * virtual tree alive for deeper mappings.  The conversion
+		 * only makes sense for a plain DEL (no sibling variants). */
 		old_flags = rule->flags;
 		WRITE_ONCE(rule->flags,
 			   old_flags | KSU_NOMOUNT_FLAG_INTERNAL |
@@ -2054,6 +2362,7 @@ static int ksu_nomount_del_normalized_locked(
 		err = ksu_nomount_update_parent_identity_locked(normalized, rule);
 		if (err)
 			WRITE_ONCE(rule->flags, old_flags);
+		ksu_nomount_parent_set_opaque_locked(rule->parent);
 		return err;
 	}
 	err = ksu_nomount_remove_rule_locked(
@@ -2285,7 +2594,8 @@ static int ksu_nomount_create_missing_ancestors_locked(
 			rule = ksu_nomount_alloc_rule(
 				prefix, internal_real,
 				KSU_NOMOUNT_FLAG_INTERNAL | KSU_NOMOUNT_FLAG_IS_DIR,
-				DT_DIR, &resolved, false, 0, 0, visible_statfs);
+				DT_DIR, &resolved, false, 0, 0, visible_statfs,
+				0, 0, 0, 0);
 		path_put(&resolved);
 		if (IS_ERR(rule)) {
 			err = PTR_ERR(rule);
@@ -2336,7 +2646,8 @@ static void ksu_nomount_release_victims(struct list_head *rule_victims,
 }
 
 int ksu_nomount_add_rule(const char *virtual_path, const char *real_path,
-			 u32 flags)
+			 u32 flags, u32 uid_start, u32 uid_end, u32 deny_start,
+			 u32 deny_end)
 {
 	char *normalized_virtual = __getname();
 	char *normalized_real = __getname();
@@ -2356,6 +2667,11 @@ int ksu_nomount_add_rule(const char *virtual_path, const char *real_path,
 	LIST_HEAD(rule_victims);
 	LIST_HEAD(parent_victims);
 	int err;
+
+	err = ksu_nomount_validate_scope(&uid_start, &uid_end, &deny_start,
+					 &deny_end);
+	if (err)
+		return err;
 
 	if (!normalized_virtual || !normalized_real || !parent_path) {
 		err = -ENOMEM;
@@ -2434,7 +2750,8 @@ int ksu_nomount_add_rule(const char *virtual_path, const char *real_path,
 		normalized_virtual, normalized_real, flags,
 		whiteout ? DT_REG : d_type, backend_resolved ? &backend : NULL,
 		visible_exists, visible_ino, visible_dev,
-		whiteout ? NULL : &visible_statfs);
+		whiteout ? NULL : &visible_statfs, uid_start, uid_end,
+		deny_start, deny_end);
 	if (IS_ERR(rule)) {
 		err = PTR_ERR(rule);
 		rule = NULL;
@@ -2475,13 +2792,16 @@ out:
 	return err;
 }
 
-int ksu_nomount_del_rule(const char *virtual_path)
+int ksu_nomount_del_rule(const char *virtual_path, u32 uid_start, u32 uid_end,
+			 u32 deny_start, u32 deny_end)
 {
 	char *normalized = __getname();
 	char *parent_path = __getname();
 	const char *unused_name;
 	LIST_HEAD(rule_victims);
 	LIST_HEAD(parent_victims);
+	size_t len;
+	u32 hash;
 	int err;
 
 	if (!normalized || !parent_path) {
@@ -2496,10 +2816,13 @@ int ksu_nomount_del_rule(const char *virtual_path)
 				     KSU_NOMOUNT_MAX_PATH, &unused_name);
 	if (err)
 		goto out;
+	len = strlen(normalized);
+	hash = ksu_nomount_hash_path_len(normalized, len);
 
 	mutex_lock(&ksu_nomount_lock);
 	err = ksu_nomount_del_normalized_locked(
-		normalized, parent_path, &rule_victims, &parent_victims, true);
+		normalized, len, hash, parent_path, uid_start, uid_end,
+		deny_start, deny_end, &rule_victims, &parent_victims, true);
 	mutex_unlock(&ksu_nomount_lock);
 	ksu_nomount_release_victims(&rule_victims, &parent_victims);
 out:
@@ -2553,7 +2876,9 @@ out:
 	return common;
 }
 
-int ksu_nomount_del_rules(char **virtual_paths, unsigned int count)
+int ksu_nomount_del_rules(char **virtual_paths, unsigned int count,
+			  u32 uid_start, u32 uid_end, u32 deny_start,
+			  u32 deny_end)
 {
 	char *common_parent = __getname();
 	char *normalized = __getname();
@@ -2571,7 +2896,9 @@ int ksu_nomount_del_rules(char **virtual_paths, unsigned int count)
 	    !ksu_nomount_del_batch_common_parent(virtual_paths, count,
 						 common_parent)) {
 		for (i = 0; i < count; i++) {
-			int err = ksu_nomount_del_rule(virtual_paths[i]);
+			int err = ksu_nomount_del_rule(virtual_paths[i],
+						       uid_start, uid_end,
+						       deny_start, deny_end);
 
 			if (err && !first_err)
 				first_err = err;
@@ -2582,6 +2909,8 @@ int ksu_nomount_del_rules(char **virtual_paths, unsigned int count)
 	mutex_lock(&ksu_nomount_lock);
 	for (i = 0; i < count; i++) {
 		int err;
+		size_t len;
+		u32 hash;
 
 		err = ksu_nomount_normalize_path(normalized,
 						 KSU_NOMOUNT_MAX_PATH,
@@ -2590,9 +2919,14 @@ int ksu_nomount_del_rules(char **virtual_paths, unsigned int count)
 			err = ksu_nomount_split_path(normalized, parent_path,
 						     KSU_NOMOUNT_MAX_PATH,
 						     &unused_name);
+		if (!err) {
+			len = strlen(normalized);
+			hash = ksu_nomount_hash_path_len(normalized, len);
+		}
 		if (!err)
 			err = ksu_nomount_del_normalized_locked(
-				normalized, parent_path, &rule_victims,
+				normalized, len, hash, parent_path, uid_start,
+				uid_end, deny_start, deny_end, &rule_victims,
 				&parent_victims, false);
 		if (err) {
 			if (!first_err)
@@ -2616,15 +2950,13 @@ out:
 	return first_err;
 }
 
-void ksu_nomount_clear_all(void)
+void ksu_nomount_clear_rules(void)
 {
 	struct ksu_nomount_rule *rule, *rule_tmp;
-	struct ksu_nomount_uid *uid, *uid_tmp;
 	struct ksu_nomount_parent *parent, *parent_tmp;
 	struct ksu_nomount_child_array *children;
 	struct hlist_node *tmp;
 	LIST_HEAD(rule_victims);
-	LIST_HEAD(uid_victims);
 	LIST_HEAD(parent_victims);
 	int bkt;
 
@@ -2632,10 +2964,6 @@ void ksu_nomount_clear_all(void)
 	hash_for_each_safe(ksu_nomount_rules, bkt, tmp, rule, path_node) {
 		ksu_nomount_unlink_rule_locked(rule);
 		list_add_tail(&rule->gc_node, &rule_victims);
-	}
-	hash_for_each_safe(ksu_nomount_uids, bkt, tmp, uid, node) {
-		hash_del_rcu(&uid->node);
-		list_add_tail(&uid->gc_node, &uid_victims);
 	}
 	list_for_each_entry_safe(parent, parent_tmp, &ksu_nomount_parent_list,
 				 all_node) {
@@ -2651,10 +2979,7 @@ void ksu_nomount_clear_all(void)
 	}
 	if (atomic_read(&ksu_nomount_rule_count))
 		static_branch_disable(&ksu_nomount_active_rules);
-	if (atomic_read(&ksu_nomount_uid_count))
-		static_branch_disable(&ksu_nomount_active_uids);
 	atomic_set(&ksu_nomount_rule_count, 0);
-	atomic_set(&ksu_nomount_uid_count, 0);
 	mutex_unlock(&ksu_nomount_lock);
 
 	synchronize_rcu();
@@ -2662,15 +2987,41 @@ void ksu_nomount_clear_all(void)
 		list_del(&rule->gc_node);
 		ksu_nomount_rule_free(rule);
 	}
-	list_for_each_entry_safe(uid, uid_tmp, &uid_victims, gc_node) {
-		list_del(&uid->gc_node);
-		kfree(uid);
-	}
 	list_for_each_entry_safe(parent, parent_tmp, &parent_victims, all_node) {
 		list_del(&parent->all_node);
 		kfree(parent->path);
 		kfree(parent);
 	}
+}
+
+void ksu_nomount_clear_uids(void)
+{
+	struct ksu_nomount_uid *uid, *uid_tmp;
+	struct hlist_node *tmp;
+	LIST_HEAD(uid_victims);
+	int bkt;
+
+	mutex_lock(&ksu_nomount_lock);
+	hash_for_each_safe(ksu_nomount_uids, bkt, tmp, uid, node) {
+		hash_del_rcu(&uid->node);
+		list_add_tail(&uid->gc_node, &uid_victims);
+	}
+	if (atomic_read(&ksu_nomount_uid_count))
+		static_branch_disable(&ksu_nomount_active_uids);
+	atomic_set(&ksu_nomount_uid_count, 0);
+	mutex_unlock(&ksu_nomount_lock);
+
+	synchronize_rcu();
+	list_for_each_entry_safe(uid, uid_tmp, &uid_victims, gc_node) {
+		list_del(&uid->gc_node);
+		kfree(uid);
+	}
+}
+
+void ksu_nomount_clear_all(void)
+{
+	ksu_nomount_clear_rules();
+	ksu_nomount_clear_uids();
 }
 
 int ksu_nomount_add_uid(uid_t uid)
@@ -2719,30 +3070,83 @@ int ksu_nomount_del_uid(uid_t uid)
 	return -ENOENT;
 }
 
+/*
+ * Blocking-state query: *cursor carries the pagination token (bucket << 32 |
+ * entry counter) from the previous call; 0 restarts the walk.  The kernel
+ * stores up to max_uids uids, bumps *count and rewrites *cursor with the
+ * next token (0 once the walk is exhausted).
+ */
+int ksu_nomount_get_uids(u64 *cursor, u32 *uids, size_t max_uids, size_t *count)
+{
+	struct ksu_nomount_uid *entry;
+	u32 bucket, start_idx, start_bkt, stored = 0, pos;
+	u64 next = 0;
+
+	if (!cursor || !uids || !count || !max_uids)
+		return -EINVAL;
+	bucket = (u32)(*cursor >> 32);
+	start_idx = (u32)*cursor;
+	if (bucket >= HASH_SIZE(ksu_nomount_uids)) {
+		*cursor = 0;
+		*count = 0;
+		return 0;
+	}
+	start_bkt = bucket;
+	rcu_read_lock();
+	for (; bucket < HASH_SIZE(ksu_nomount_uids); bucket++) {
+		pos = 0;
+		hlist_for_each_entry_rcu(entry, &ksu_nomount_uids[bucket],
+					 node) {
+			if (bucket == start_bkt && pos < start_idx) {
+				pos++;
+				continue;
+			}
+			if (stored >= max_uids) {
+				next = ((u64)bucket << 32) | pos;
+				goto out;
+			}
+			uids[stored++] = entry->uid;
+			pos++;
+		}
+	}
+out:
+	rcu_read_unlock();
+	*cursor = next;
+	*count = stored;
+	return 0;
+}
+
 int ksu_nomount_get_dump_rule(struct ksu_nomount_dump_state *state,
-				      char *virtual_path, size_t virtual_size,
-				      char *real_path, size_t real_size, u32 *flags)
+			      char *virtual_path, size_t virtual_size,
+			      char *real_path, size_t real_size, u32 *flags,
+			      u32 *uid_start, u32 *uid_end, u32 *deny_start,
+			      u32 *deny_end)
 {
 	struct ksu_nomount_rule *rule;
 	u32 bucket;
 	int ret = -ENOENT;
 
-	if (!state || !virtual_path || !real_path || !flags)
+	if (!state || !virtual_path || !real_path || !flags || !uid_start ||
+	    !uid_end || !deny_start || !deny_end)
 		return -EINVAL;
 
 	rcu_read_lock();
 	for (bucket = state->bucket; bucket < HASH_SIZE(ksu_nomount_rules);
 	     bucket++) {
 		u32 skip = bucket == state->bucket ? state->index : 0;
+		u32 pos = 0;
 
 		hlist_for_each_entry_rcu(rule, &ksu_nomount_rules[bucket],
 					 path_node) {
 			u32 rule_flags = READ_ONCE(rule->flags);
 
-			if (rule_flags & KSU_NOMOUNT_FLAG_INTERNAL)
-				continue;
 			if (skip) {
 				skip--;
+				pos++;
+				continue;
+			}
+			if (rule_flags & KSU_NOMOUNT_FLAG_INTERNAL) {
+				pos++;
 				continue;
 			}
 			if (strscpy(virtual_path, rule->virtual_path,
@@ -2752,8 +3156,13 @@ int ksu_nomount_get_dump_rule(struct ksu_nomount_dump_state *state,
 				goto out_unlock;
 			}
 			*flags = rule_flags & ~KSU_NOMOUNT_FLAG_INTERNAL;
+			*uid_start = READ_ONCE(rule->uid_start);
+			*uid_end = READ_ONCE(rule->uid_end);
+			*deny_start = READ_ONCE(rule->deny_start);
+			*deny_end = READ_ONCE(rule->deny_end);
 			state->bucket = bucket;
-			state->index = state->index + 1;
+			/* Exact resume: skip counts every visited entry. */
+			state->index = pos + 1;
 			ret = 0;
 			goto out_unlock;
 		}
@@ -2946,6 +3355,13 @@ struct filename *ksu_nomount_handle_getname(struct filename *name)
 	} else {
 		rule = ksu_nomount_find_dir_prefix_rule_rcu(path, len,
 							    &dir_prefix_len);
+		if (rule &&
+		    (READ_ONCE(rule->flags) & KSU_NOMOUNT_FLAG_OPAQUE)) {
+			/* Unmatched children of an opaque redirected
+			 * directory stay hidden. */
+			whiteout = true;
+			goto unlock;
+		}
 		if (rule) {
 			size_t suffix_len = len - dir_prefix_len;
 			size_t replacement_len = rule->real_len + suffix_len;
@@ -3020,10 +3436,14 @@ static loff_t ksu_nomount_magic_pos(void)
 	return KSU_NOMOUNT_MAGIC_POS;
 }
 
+static bool ksu_nomount_parent_opaque_for_uid_rcu(
+	const struct ksu_nomount_parent *parent, u32 uid);
+
 static struct ksu_nomount_child_array *
 ksu_nomount_get_children_for_inode(struct inode *inode, bool *internal,
 				   unsigned long *visible_ino,
-				   unsigned long *parent_visible_ino)
+				   unsigned long *parent_visible_ino,
+				   bool *opaque, u32 uid)
 {
 	struct ksu_nomount_child_array *children = NULL;
 	struct ksu_nomount_parent *parent;
@@ -3048,6 +3468,11 @@ ksu_nomount_get_children_for_inode(struct inode *inode, bool *internal,
 			*internal = READ_ONCE(parent->internal);
 			*visible_ino = READ_ONCE(parent->visible_ino);
 			*parent_visible_ino = *visible_ino;
+			/* Cheap gate first: any opaque dir rule at this
+			 * path, then scope-check for this uid. */
+			*opaque = READ_ONCE(parent->opaque) &&
+				  ksu_nomount_parent_opaque_for_uid_rcu(
+					  parent, uid);
 			hash_for_each_possible_rcu(ksu_nomount_parents,
 						   virtual_parent, path_node,
 						   hash) {
@@ -3069,9 +3494,11 @@ ksu_nomount_get_children_for_inode(struct inode *inode, bool *internal,
 
 static bool ksu_nomount_parent_has_child_rcu(unsigned long parent_ino,
 					     dev_t parent_dev,
-					     const char *name, int namelen)
+					     const char *name, int namelen,
+					     u32 uid)
 {
 	struct ksu_nomount_rule *rule;
+	struct ksu_nomount_parent *parent;
 	u32 name_hash;
 	bool found = false;
 
@@ -3082,17 +3509,21 @@ static bool ksu_nomount_parent_has_child_rcu(unsigned long parent_ino,
 	rcu_read_lock();
 	hash_for_each_possible_rcu(ksu_nomount_basenames, rule, basename_node,
 				   name_hash) {
-		struct ksu_nomount_parent *parent;
+		u32 flags;
 
 		if (READ_ONCE(rule->basename_hash) != name_hash ||
 		    READ_ONCE(rule->basename_len) != (u16)namelen)
 			continue;
-		if (READ_ONCE(rule->visible_exists))
+		flags = READ_ONCE(rule->flags);
+		if (!(flags & KSU_NOMOUNT_FLAG_INTERNAL) &&
+		    !ksu_nomount_rule_uid_match(rule, uid))
 			continue;
 		parent = READ_ONCE(rule->parent);
 		if (!parent ||
 		    READ_ONCE(parent->ino) != parent_ino ||
 		    READ_ONCE(parent->dev) != parent_dev)
+			continue;
+		if (READ_ONCE(rule->visible_exists))
 			continue;
 		if (!memcmp(rule->name, name, namelen)) {
 			found = true;
@@ -3104,6 +3535,77 @@ static bool ksu_nomount_parent_has_child_rcu(unsigned long parent_ino,
 	return found;
 }
 
+/* Rule-set visibility of one child entry for this uid (magic continuation
+ * phase).  Internal plumbing names stay visible; user rules need a scope
+ * match, and entries already handled by the native pass-through are
+ * excluded before this call. */
+static bool ksu_nomount_child_visible_for_uid_rcu(
+	u32 uid, const struct ksu_nomount_child_array *children,
+	const struct ksu_nomount_child *child)
+{
+	struct ksu_nomount_rule *rule;
+	const char *name;
+	u16 len = READ_ONCE(child->name_len);
+	u32 name_hash = READ_ONCE(child->name_hash);
+	bool visible = false;
+
+	name = ksu_nomount_child_name(children, child);
+	rcu_read_lock();
+	hash_for_each_possible_rcu(ksu_nomount_basenames, rule, basename_node,
+				   name_hash) {
+		u32 flags;
+
+		if (READ_ONCE(rule->basename_hash) != name_hash ||
+		    READ_ONCE(rule->basename_len) != len)
+			continue;
+		if (memcmp(rule->name, name, len))
+			continue;
+		flags = READ_ONCE(rule->flags);
+		if (flags & KSU_NOMOUNT_FLAG_INTERNAL) {
+			visible = true;
+			break;
+		}
+		if (!ksu_nomount_rule_uid_match(rule, uid))
+			continue;
+		if (READ_ONCE(rule->visible_exists))
+			continue;
+		visible = true;
+		break;
+	}
+	rcu_read_unlock();
+	return visible;
+}
+
+/* Opaque suppression is scope-conditional: only true for uids actually
+ * heading an opaque dir rule for this parent.  Used after the cheap
+ * parent->opaque fast path. */
+static bool ksu_nomount_parent_opaque_for_uid_rcu(
+	const struct ksu_nomount_parent *parent, u32 uid)
+{
+	struct ksu_nomount_rule *rule;
+	size_t len = strlen(parent->path);
+	u32 hash = ksu_nomount_hash_path_len(parent->path, len);
+	bool opaque = false;
+
+	hash_for_each_possible_rcu(ksu_nomount_rules, rule, path_node, hash) {
+		u32 flags;
+
+		if (rule->hash != hash || rule->virtual_len != len ||
+		    memcmp(rule->virtual_path, parent->path, len))
+			continue;
+		flags = READ_ONCE(rule->flags);
+		if (flags & KSU_NOMOUNT_FLAG_INTERNAL)
+			continue;
+		if (!(flags & KSU_NOMOUNT_FLAG_OPAQUE))
+			continue;
+		if (!ksu_nomount_rule_uid_match(rule, uid))
+			continue;
+		opaque = true;
+		break;
+	}
+	return opaque;
+}
+
 static KSU_SUSFS_ACTOR_RET ksu_nomount_iter_actor(
 	struct dir_context *ctx, const char *name, int namelen, loff_t offset,
 	u64 ino, unsigned int d_type)
@@ -3112,8 +3614,11 @@ static KSU_SUSFS_ACTOR_RET ksu_nomount_iter_actor(
 		container_of(ctx, struct ksu_nomount_iter_ctx, ctx);
 	KSU_SUSFS_ACTOR_RET ret;
 
+	if (proxy->suppress_native)
+		return KSU_SUSFS_ACTOR_CONTINUE;
 	if (ksu_nomount_parent_has_child_rcu(proxy->parent_ino,
-					     proxy->parent_dev, name, namelen))
+					     proxy->parent_dev, name, namelen,
+					     proxy->uid))
 		return KSU_SUSFS_ACTOR_CONTINUE;
 	if (namelen == 1 && name[0] == '.')
 		ino = proxy->visible_ino;
@@ -3141,7 +3646,8 @@ static int ksu_nomount_call_real_iterate(struct file *file,
 }
 
 static void ksu_nomount_emit_children_array(
-	struct ksu_nomount_child_array *children, struct dir_context *ctx)
+	struct ksu_nomount_child_array *children, struct dir_context *ctx,
+	u32 uid)
 {
 	loff_t magic = ksu_nomount_magic_pos();
 	unsigned long start = 0;
@@ -3168,6 +3674,11 @@ static void ksu_nomount_emit_children_array(
 			continue;
 		}
 		if (flags & KSU_NOMOUNT_FLAG_WHITEOUT) {
+			ctx->pos = magic + i + 1;
+			continue;
+		}
+		if (!ksu_nomount_child_visible_for_uid_rcu(uid, children,
+							   child)) {
 			ctx->pos = magic + i + 1;
 			continue;
 		}
@@ -3258,6 +3769,8 @@ int ksu_nomount_handle_iterate_dir(struct file *file,
 	bool internal = false;
 	unsigned long visible_ino = 0;
 	unsigned long parent_visible_ino = 0;
+	bool opaque = false;
+	u32 uid = current_uid().val;
 	loff_t old_pos = ctx->pos;
 	loff_t magic = ksu_nomount_magic_pos();
 	int ret;
@@ -3283,7 +3796,8 @@ int ksu_nomount_handle_iterate_dir(struct file *file,
 #endif
 
 	children = ksu_nomount_get_children_for_inode(
-		inode, &internal, &visible_ino, &parent_visible_ino);
+		inode, &internal, &visible_ino, &parent_visible_ino,
+		&opaque, uid);
 	if (!children)
 		return ksu_nomount_call_real_iterate(file, ctx);
 	if (internal) {
@@ -3292,13 +3806,13 @@ int ksu_nomount_handle_iterate_dir(struct file *file,
 			ksu_nomount_child_array_put(children);
 			return 0;
 		}
-		ksu_nomount_emit_children_array(children, ctx);
+		ksu_nomount_emit_children_array(children, ctx, uid);
 		ksu_nomount_child_array_put(children);
 		return 0;
 	}
 	if (ctx->pos >= magic &&
 	    ctx->pos < magic + KSU_NOMOUNT_MAGIC_WINDOW) {
-		ksu_nomount_emit_children_array(children, ctx);
+		ksu_nomount_emit_children_array(children, ctx, uid);
 		ksu_nomount_child_array_put(children);
 		return 0;
 	}
@@ -3312,10 +3826,12 @@ int ksu_nomount_handle_iterate_dir(struct file *file,
 	proxy.visible_ino = visible_ino;
 	proxy.parent_visible_ino = parent_visible_ino;
 	proxy.parent_dev = inode->i_sb->s_dev;
+	proxy.suppress_native = opaque;
+	proxy.uid = uid;
 	ret = ksu_nomount_call_real_iterate(file, &proxy.ctx);
 	ctx->pos = proxy.ctx.pos;
 	if (ret >= 0 && (ctx->pos == old_pos || ctx->pos >= magic))
-		ksu_nomount_emit_children_array(children, ctx);
+		ksu_nomount_emit_children_array(children, ctx, uid);
 	ksu_nomount_child_array_put(children);
 	return ret;
 }
